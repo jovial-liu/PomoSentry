@@ -1,0 +1,24 @@
+# Swift / Xcode build output
+.build/
+DerivedData/
+*.xcodeproj/xcuserdata/
+*.xcworkspace/xcuserdata/
+
+# Packaged applications and release artifacts
+*.app/
+*.dmg
+*.zip
+*-SHA256.txt
+Archive/
+
+# macOS and editor state
+.DS_Store
+*.swp
+*.xcuserstate
+
+# Signing and notarization material must never be committed
+*.p12
+*.cer
+*.provisionprofile
+*.mobileprovision
+notarytool-profile*
