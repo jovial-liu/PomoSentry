@@ -31,7 +31,6 @@ struct ContentView: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
         .animation(.snappy(duration: 0.18, extraBounce: 0), value: selectedSection)
         .preferredColorScheme(.light)
         .onReceive(timer) { _ in store.tick() }

@@ -56,10 +56,13 @@ struct WindowConfigurator: NSViewRepresentable {
         guard let window else { return }
         window.titlebarAppearsTransparent = true
         window.titleVisibility = .hidden
-        window.isOpaque = false
-        window.backgroundColor = .clear
+        window.titlebarSeparatorStyle = .none
+        window.isOpaque = true
+        window.backgroundColor = NSColor(calibratedRed: 0.91, green: 0.97, blue: 0.94, alpha: 1)
         window.styleMask.insert(.fullSizeContentView)
+        window.isMovableByWindowBackground = true
         window.contentView?.wantsLayer = true
+        window.contentView?.layer?.backgroundColor = NSColor(calibratedRed: 0.91, green: 0.97, blue: 0.94, alpha: 1).cgColor
         window.contentView?.layer?.cornerRadius = 18
         window.contentView?.layer?.cornerCurve = .continuous
         window.contentView?.layer?.masksToBounds = true
