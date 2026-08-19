@@ -229,15 +229,20 @@ struct GuardPanel: View {
                     }
 
                     if focusGuard.inputPermissionRequired {
-                        HStack {
+                        VStack(alignment: .leading, spacing: 9) {
                             Label("严格拦截需要辅助功能权限；未授权时不会开始计时。", systemImage: "exclamationmark.shield.fill")
                                 .font(.system(size: 11, weight: .semibold))
                                 .foregroundStyle(Color.orange)
-                            Spacer()
-                            Button("打开系统设置") { focusGuard.openAccessibilitySettings() }
-                                .buttonStyle(.plain)
-                                .font(.system(size: 11, weight: .bold))
-                                .foregroundStyle(Color.tomato)
+                            Text("如果同名 PomoSentry 已开启但仍显示未授权，请删除旧条目，再用“+”添加当前版本。")
+                                .font(.system(size: 10))
+                                .foregroundStyle(Color.ink.opacity(0.52))
+                            HStack(spacing: 16) {
+                                Button("打开系统设置") { focusGuard.openAccessibilitySettings() }
+                                Button("显示当前 App") { focusGuard.revealCurrentApplication() }
+                            }
+                            .buttonStyle(.plain)
+                            .font(.system(size: 11, weight: .bold))
+                            .foregroundStyle(Color.tomato)
                         }
                     }
 

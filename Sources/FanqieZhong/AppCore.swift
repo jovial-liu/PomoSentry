@@ -557,6 +557,7 @@ final class FocusGuard: ObservableObject {
     private let mainBundleID = "app.pomosentry.mac"
     private var observers: [NSObjectProtocol] = []
     private var reconciliationTask: Task<Void, Never>?
+    private var permissionPollingTask: Task<Void, Never>?
     private var lastAllowedPID: pid_t?
     private var activeBlockedPID: pid_t?
     private var hiddenByGuardPIDs: Set<pid_t> = []
@@ -591,17 +592,25 @@ final class FocusGuard: ObservableObject {
         guard !isMonitoring else { return }
         isEnabled = enabled
         defaults.set(enabled, forKey: "strictModeEnabled")
-        if !enabled { stopMonitoring() }
+        if !enabled {
+            stopMonitoring()
+            permissionPollingTask?.cancel()
+            permissionPollingTask = nil
+            inputPermissionRequired = false
+        }
     }
 
     @discardableResult
     func startMonitoring() -> Bool {
         guard !isMonitoring else { return true }
-        guard Self.accessibilityPermission(prompt: true) else {
+        guard Self.accessibilityPermission() else {
             inputPermissionRequired = true
             lastBlockedApp = localized("请允许 PomoSentry 使用辅助功能后重新开始", "Allow PomoSentry in Accessibility, then start again")
+            beginPermissionPolling()
             return false
         }
+        permissionPollingTask?.cancel()
+        permissionPollingTask = nil
         inputPermissionRequired = false
         blockedCount = 0
         activeBlockedPID = nil
@@ -742,7 +751,12 @@ final class FocusGuard: ObservableObject {
 
     func openAccessibilitySettings() {
         guard let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility") else { return }
+        beginPermissionPolling()
         workspace.open(url)
+    }
+
+    func revealCurrentApplication() {
+        workspace.activateFileViewerSelecting([Bundle.main.bundleURL])
     }
 
     private func loadConfiguration() {
@@ -796,10 +810,23 @@ final class FocusGuard: ObservableObject {
         }
     }
 
-    private static func accessibilityPermission(prompt: Bool) -> Bool {
-        guard prompt else { return AXIsProcessTrusted() }
-        let options = ["AXTrustedCheckOptionPrompt": true] as CFDictionary
-        return AXIsProcessTrustedWithOptions(options)
+    private func beginPermissionPolling() {
+        guard permissionPollingTask == nil else { return }
+        permissionPollingTask = Task { [weak self] in
+            while !Task.isCancelled {
+                if Self.accessibilityPermission() {
+                    self?.inputPermissionRequired = false
+                    self?.lastBlockedApp = ""
+                    self?.permissionPollingTask = nil
+                    return
+                }
+                try? await Task.sleep(for: .milliseconds(500))
+            }
+        }
+    }
+
+    private static func accessibilityPermission() -> Bool {
+        AXIsProcessTrusted()
     }
 
     private func enforce(_ application: NSRunningApplication?) {
