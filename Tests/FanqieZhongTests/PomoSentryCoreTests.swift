@@ -39,4 +39,11 @@ final class PomoSentryCoreTests: XCTestCase {
         XCTAssertEqual(Countdown.remaining(deadline: deadline, now: deadline), 0)
         XCTAssertEqual(Countdown.remaining(deadline: deadline, now: deadline.addingTimeInterval(10)), 0)
     }
+
+    func testAppListPoliciesBlockTheCorrectApplications() {
+        XCTAssertFalse(AppListPolicy.allowlist.shouldBlock(isListed: true))
+        XCTAssertTrue(AppListPolicy.allowlist.shouldBlock(isListed: false))
+        XCTAssertTrue(AppListPolicy.blocklist.shouldBlock(isListed: true))
+        XCTAssertFalse(AppListPolicy.blocklist.shouldBlock(isListed: false))
+    }
 }

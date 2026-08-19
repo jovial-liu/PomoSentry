@@ -1,4 +1,5 @@
 import AppKit
+import ApplicationServices
 import CryptoKit
 import Foundation
 import Security
@@ -164,11 +165,236 @@ struct AllowedApplication: Identifiable, Codable, Equatable, Sendable {
 enum AppListPolicy: String, CaseIterable, Codable, Sendable {
     case allowlist
     case blocklist
+
+    func shouldBlock(isListed: Bool) -> Bool {
+        self == .allowlist ? !isListed : isListed
+    }
 }
 
 enum BlockingBehavior: String, CaseIterable, Codable, Sendable {
     case keepRunning
     case forceQuit
+}
+
+private final class FocusShieldPanel: NSPanel {
+    override var canBecomeKey: Bool { true }
+    override var canBecomeMain: Bool { false }
+}
+
+private struct FocusShieldView: View {
+    let applicationName: String
+
+    var body: some View {
+        ZStack {
+            Color.black
+
+            VStack(spacing: 14) {
+                Image(systemName: "hand.raised.fill")
+                    .font(.system(size: 36, weight: .bold))
+                    .foregroundStyle(Color(red: 0.94, green: 0.35, blue: 0.25))
+                Text(localized("专注模式已拦截", "Focus mode blocked this app"))
+                    .font(.system(size: 24, weight: .bold, design: .rounded))
+                    .foregroundStyle(.white)
+                Text(applicationName)
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundStyle(.white.opacity(0.82))
+                Text(localized("它仍在后台运行，但专注结束前无法操作。", "It is still running in the background, but cannot be used until focus ends."))
+                    .font(.system(size: 12))
+                    .foregroundStyle(.white.opacity(0.58))
+            }
+            .multilineTextAlignment(.center)
+            .padding(.horizontal, 34)
+            .padding(.vertical, 28)
+            .background(Color.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 24, style: .continuous))
+            .overlay {
+                RoundedRectangle(cornerRadius: 24, style: .continuous)
+                    .stroke(Color.white.opacity(0.16), lineWidth: 1)
+            }
+        }
+        .ignoresSafeArea()
+    }
+}
+
+private final class StrictInputGate: @unchecked Sendable {
+    private let lock = NSLock()
+    private var active = false
+    private var policy = AppListPolicy.allowlist
+    private var listedPIDs: Set<pid_t> = []
+    private var frontmostPID: pid_t?
+    private let ownPID = ProcessInfo.processInfo.processIdentifier
+
+    func configure(policy: AppListPolicy, listedPIDs: Set<pid_t>, frontmostPID: pid_t?) {
+        lock.lock()
+        self.policy = policy
+        self.listedPIDs = listedPIDs
+        self.frontmostPID = frontmostPID
+        active = true
+        lock.unlock()
+    }
+
+    func update(policy: AppListPolicy, listedPIDs: Set<pid_t>, frontmostPID: pid_t?) {
+        lock.lock()
+        self.policy = policy
+        self.listedPIDs = listedPIDs
+        self.frontmostPID = frontmostPID
+        lock.unlock()
+    }
+
+    func updateFrontmostPID(_ processIdentifier: pid_t?) {
+        lock.lock()
+        frontmostPID = processIdentifier
+        lock.unlock()
+    }
+
+    func stop() {
+        lock.lock()
+        active = false
+        listedPIDs.removeAll()
+        frontmostPID = nil
+        lock.unlock()
+    }
+
+    func shouldBlock(processIdentifier: pid_t?) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        guard active else { return false }
+        guard let processIdentifier else { return true }
+        if processIdentifier == ownPID { return false }
+        return policy.shouldBlock(isListed: listedPIDs.contains(processIdentifier))
+    }
+
+    func shouldBlockFrontmostApplication() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        guard active else { return false }
+        guard let frontmostPID else { return true }
+        if frontmostPID == ownPID { return false }
+        return policy.shouldBlock(isListed: listedPIDs.contains(frontmostPID))
+    }
+}
+
+private final class StrictInputTap {
+    private let gate: StrictInputGate
+    private var eventTap: CFMachPort?
+    private var runLoopSource: CFRunLoopSource?
+
+    init(gate: StrictInputGate) {
+        self.gate = gate
+    }
+
+    func start() -> Bool {
+        guard eventTap == nil else { return true }
+        let eventTypes: [CGEventType] = [
+            .leftMouseDown, .leftMouseUp, .rightMouseDown, .rightMouseUp,
+            .otherMouseDown, .otherMouseUp, .leftMouseDragged, .rightMouseDragged,
+            .otherMouseDragged, .scrollWheel, .keyDown, .keyUp, .flagsChanged
+        ]
+        let mask = eventTypes.reduce(CGEventMask(0)) { partial, type in
+            partial | (CGEventMask(1) << CGEventMask(type.rawValue))
+        }
+        let userInfo = Unmanaged.passUnretained(self).toOpaque()
+        guard let tap = CGEvent.tapCreate(
+            tap: .cgSessionEventTap,
+            place: .headInsertEventTap,
+            options: .defaultTap,
+            eventsOfInterest: mask,
+            callback: { _, type, event, userInfo in
+                guard let userInfo else { return Unmanaged.passUnretained(event) }
+                let controller = Unmanaged<StrictInputTap>.fromOpaque(userInfo).takeUnretainedValue()
+                if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
+                    if let tap = controller.eventTap { CGEvent.tapEnable(tap: tap, enable: true) }
+                    return Unmanaged.passUnretained(event)
+                }
+                return controller.shouldSuppress(type: type, event: event) ? nil : Unmanaged.passUnretained(event)
+            },
+            userInfo: userInfo
+        ) else { return false }
+
+        let source = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0)
+        eventTap = tap
+        runLoopSource = source
+        CFRunLoopAddSource(CFRunLoopGetMain(), source, .commonModes)
+        CGEvent.tapEnable(tap: tap, enable: true)
+        return true
+    }
+
+    func stop() {
+        if let eventTap { CGEvent.tapEnable(tap: eventTap, enable: false) }
+        if let runLoopSource { CFRunLoopRemoveSource(CFRunLoopGetMain(), runLoopSource, .commonModes) }
+        if let eventTap { CFMachPortInvalidate(eventTap) }
+        runLoopSource = nil
+        eventTap = nil
+    }
+
+    private func shouldSuppress(type: CGEventType, event: CGEvent) -> Bool {
+        switch type {
+        case .leftMouseDown, .leftMouseUp, .rightMouseDown, .rightMouseUp,
+             .otherMouseDown, .otherMouseUp, .leftMouseDragged, .rightMouseDragged,
+             .otherMouseDragged, .scrollWheel:
+            return gate.shouldBlock(processIdentifier: Self.windowOwner(at: event.location))
+        case .keyDown, .keyUp, .flagsChanged:
+            return gate.shouldBlockFrontmostApplication()
+        default:
+            return false
+        }
+    }
+
+    private static func windowOwner(at point: CGPoint) -> pid_t? {
+        let options: CGWindowListOption = [.optionOnScreenOnly, .excludeDesktopElements]
+        guard let windows = CGWindowListCopyWindowInfo(options, kCGNullWindowID) as? [[String: Any]] else { return nil }
+        for window in windows {
+            if let alpha = window[kCGWindowAlpha as String] as? NSNumber, alpha.doubleValue <= 0 { continue }
+            guard let boundsDictionary = window[kCGWindowBounds as String] as? NSDictionary,
+                  let bounds = CGRect(dictionaryRepresentation: boundsDictionary),
+                  bounds.contains(point),
+                  let owner = window[kCGWindowOwnerPID as String] as? NSNumber else { continue }
+            return pid_t(owner.int32Value)
+        }
+        return nil
+    }
+}
+
+@MainActor
+private final class FocusShieldController {
+    private var panels: [FocusShieldPanel] = []
+    private var blockedPID: pid_t?
+
+    func show(applicationName: String, processIdentifier: pid_t) {
+        guard blockedPID != processIdentifier || panels.isEmpty else { return }
+        dismiss()
+        blockedPID = processIdentifier
+
+        for screen in NSScreen.screens {
+            let panel = FocusShieldPanel(
+                contentRect: screen.frame,
+                styleMask: [.borderless],
+                backing: .buffered,
+                defer: false,
+                screen: screen
+            )
+            panel.level = .screenSaver
+            panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary, .ignoresCycle]
+            panel.animationBehavior = .none
+            panel.isOpaque = false
+            panel.backgroundColor = .clear
+            panel.hasShadow = false
+            panel.hidesOnDeactivate = false
+            panel.ignoresMouseEvents = false
+            panel.contentView = NSHostingView(rootView: FocusShieldView(applicationName: applicationName))
+            panel.setFrame(screen.frame, display: true)
+            panel.orderFrontRegardless()
+            panels.append(panel)
+        }
+    }
+
+    func dismiss() {
+        panels.forEach { panel in
+            panel.orderOut(nil)
+            panel.close()
+        }
+        panels.removeAll()
+        blockedPID = nil
+    }
 }
 
 enum WebsiteRulesError: LocalizedError, Equatable {
@@ -324,6 +550,7 @@ final class FocusGuard: ObservableObject {
     @Published var websiteStatus = ""
     @Published private(set) var lastBlockedApp = ""
     @Published private(set) var blockedCount = 0
+    @Published private(set) var inputPermissionRequired = false
 
     private let workspace = NSWorkspace.shared
     private let defaults = UserDefaults.standard
@@ -331,7 +558,12 @@ final class FocusGuard: ObservableObject {
     private var observers: [NSObjectProtocol] = []
     private var reconciliationTask: Task<Void, Never>?
     private var lastAllowedPID: pid_t?
+    private var activeBlockedPID: pid_t?
+    private var hiddenByGuardPIDs: Set<pid_t> = []
     private var websiteOperationInProgress = false
+    private let shieldController = FocusShieldController()
+    private let inputGate = StrictInputGate()
+    private lazy var inputTap = StrictInputTap(gate: inputGate)
 
     init() {
         loadConfiguration()
@@ -342,6 +574,9 @@ final class FocusGuard: ObservableObject {
     var isWebsiteOperationInProgress: Bool { websiteOperationInProgress }
     var requiresWebsiteCleanup: Bool { websiteOperationInProgress || websiteRulesActive || Self.hostsFileContainsAnyMarker() }
     var statusText: String {
+        if inputPermissionRequired {
+            return localized("需要辅助功能权限，严格专注尚未启动", "Accessibility permission is required; strict focus did not start")
+        }
         if isMonitoring {
             return listPolicy == .allowlist
                 ? localized("严格模式运行中 · 只允许已验证的白名单 App", "Strict mode active · Verified allowlist only")
@@ -353,6 +588,7 @@ final class FocusGuard: ObservableObject {
     }
 
     func setEnabled(_ enabled: Bool) {
+        guard !isMonitoring else { return }
         isEnabled = enabled
         defaults.set(enabled, forKey: "strictModeEnabled")
         if !enabled { stopMonitoring() }
@@ -361,14 +597,31 @@ final class FocusGuard: ObservableObject {
     @discardableResult
     func startMonitoring() -> Bool {
         guard !isMonitoring else { return true }
+        guard Self.accessibilityPermission(prompt: true) else {
+            inputPermissionRequired = true
+            lastBlockedApp = localized("请允许 PomoSentry 使用辅助功能后重新开始", "Allow PomoSentry in Accessibility, then start again")
+            return false
+        }
+        inputPermissionRequired = false
         blockedCount = 0
+        activeBlockedPID = nil
         lastAllowedPID = ProcessInfo.processInfo.processIdentifier
+        refreshInputGate(frontmostApplication: workspace.frontmostApplication, configure: true)
+        guard inputTap.start() else {
+            inputGate.stop()
+            inputPermissionRequired = true
+            lastBlockedApp = localized("无法建立全局输入拦截，请检查辅助功能权限", "Could not create the global input blocker; check Accessibility permission")
+            return false
+        }
         isMonitoring = true
         let center = workspace.notificationCenter
         for name in [NSWorkspace.didActivateApplicationNotification, NSWorkspace.didLaunchApplicationNotification] {
             observers.append(center.addObserver(forName: name, object: nil, queue: .main) { [weak self] note in
                 let application = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication
-                Task { @MainActor in self?.enforce(application) }
+                Task { @MainActor in
+                    self?.refreshInputGate(frontmostApplication: application)
+                    self?.enforce(application)
+                }
             })
         }
         for name in [NSWorkspace.didWakeNotification, NSWorkspace.sessionDidBecomeActiveNotification] {
@@ -378,11 +631,12 @@ final class FocusGuard: ObservableObject {
         }
         reconciliationTask = Task { [weak self] in
             while !Task.isCancelled {
-                try? await Task.sleep(for: .milliseconds(350))
+                try? await Task.sleep(for: .milliseconds(60))
                 guard !Task.isCancelled else { break }
                 self?.enforceCurrentApplication()
             }
         }
+        hideDisallowedApplications()
         enforceCurrentApplication()
         return true
     }
@@ -392,11 +646,17 @@ final class FocusGuard: ObservableObject {
         observers.removeAll()
         reconciliationTask?.cancel()
         reconciliationTask = nil
+        inputTap.stop()
+        inputGate.stop()
+        shieldController.dismiss()
+        activeBlockedPID = nil
         isMonitoring = false
         lastBlockedApp = ""
+        restoreApplicationsHiddenByGuard()
     }
 
     func addApplication() {
+        guard !isMonitoring else { return }
         let panel = NSOpenPanel()
         panel.allowedContentTypes = [.application]
         panel.allowsMultipleSelection = false
@@ -413,6 +673,7 @@ final class FocusGuard: ObservableObject {
     }
 
     func removeApplication(_ app: AllowedApplication) {
+        guard !isMonitoring else { return }
         if listPolicy == .allowlist {
             guard app.bundleID != mainBundleID else { return }
             allowedApps.removeAll { $0.path == app.path }
@@ -423,11 +684,13 @@ final class FocusGuard: ObservableObject {
     }
 
     func setListPolicy(_ policy: AppListPolicy) {
+        guard !isMonitoring else { return }
         listPolicy = policy
         defaults.set(policy.rawValue, forKey: "appListPolicy")
     }
 
     func setBlockingBehavior(_ behavior: BlockingBehavior) {
+        guard !isMonitoring else { return }
         blockingBehavior = behavior
         defaults.set(behavior.rawValue, forKey: "blockingBehavior")
     }
@@ -477,6 +740,11 @@ final class FocusGuard: ObservableObject {
         }
     }
 
+    func openAccessibilitySettings() {
+        guard let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility") else { return }
+        workspace.open(url)
+    }
+
     private func loadConfiguration() {
         if let data = defaults.data(forKey: "allowedApps"), let decoded = try? JSONDecoder().decode([AllowedApplication].self, from: data) { allowedApps = decoded }
         if let data = defaults.data(forKey: "blockedApps"), let decoded = try? JSONDecoder().decode([AllowedApplication].self, from: data) { blockedApps = decoded.filter { $0.bundleID != mainBundleID } }
@@ -489,18 +757,16 @@ final class FocusGuard: ObservableObject {
         if let raw = defaults.string(forKey: "appListPolicy"), let value = AppListPolicy(rawValue: raw) { listPolicy = value }
         if let raw = defaults.string(forKey: "blockingBehavior"), let value = BlockingBehavior(rawValue: raw) { blockingBehavior = value }
 
+        if !defaults.bool(forKey: "didRemoveLegacyDefaultAllowlistApps") {
+            let legacyDefaults = Set(["com.apple.finder", "com.apple.systempreferences"])
+            allowedApps.removeAll { legacyDefaults.contains($0.bundleID) }
+            defaults.set(true, forKey: "didRemoveLegacyDefaultAllowlistApps")
+        }
         allowedApps.removeAll { $0.bundleID == "com.fanqiezhong.mac" || $0.bundleID == mainBundleID }
         if let selfApp = ApplicationIdentity.enrolledApplication(at: Bundle.main.bundleURL) {
             allowedApps.insert(selfApp, at: 0)
         } else {
             allowedApps.insert(AllowedApplication(bundleID: mainBundleID, name: "PomoSentry", path: Bundle.main.bundlePath), at: 0)
-        }
-        if allowedApps.count == 1 {
-            for path in ["/System/Library/CoreServices/Finder.app", "/System/Applications/System Settings.app"] {
-                if let application = ApplicationIdentity.enrolledApplication(at: URL(fileURLWithPath: path)) {
-                    allowedApps.append(application)
-                }
-            }
         }
         saveApplications()
     }
@@ -510,35 +776,97 @@ final class FocusGuard: ObservableObject {
         defaults.set(try? JSONEncoder().encode(blockedApps), forKey: "blockedApps")
     }
 
-    private func enforceCurrentApplication() { enforce(workspace.frontmostApplication) }
+    private func enforceCurrentApplication() {
+        let application = workspace.frontmostApplication
+        inputGate.updateFrontmostPID(application?.processIdentifier)
+        enforce(application)
+    }
+
+    private func refreshInputGate(frontmostApplication: NSRunningApplication?, configure: Bool = false) {
+        let list = listPolicy == .allowlist ? allowedApps : blockedApps
+        let listedPIDs = Set(workspace.runningApplications.compactMap { application -> pid_t? in
+            guard !application.isTerminated,
+                  list.contains(where: { ApplicationIdentity.matches(application, enrolled: $0) }) else { return nil }
+            return application.processIdentifier
+        })
+        if configure {
+            inputGate.configure(policy: listPolicy, listedPIDs: listedPIDs, frontmostPID: frontmostApplication?.processIdentifier)
+        } else {
+            inputGate.update(policy: listPolicy, listedPIDs: listedPIDs, frontmostPID: frontmostApplication?.processIdentifier)
+        }
+    }
+
+    private static func accessibilityPermission(prompt: Bool) -> Bool {
+        guard prompt else { return AXIsProcessTrusted() }
+        let options = ["AXTrustedCheckOptionPrompt": true] as CFDictionary
+        return AXIsProcessTrustedWithOptions(options)
+    }
 
     private func enforce(_ application: NSRunningApplication?) {
         guard isMonitoring, let application, !application.isTerminated else { return }
         if application.processIdentifier == ProcessInfo.processInfo.processIdentifier {
             lastAllowedPID = application.processIdentifier
+            activeBlockedPID = nil
+            shieldController.dismiss()
             return
         }
         let list = listPolicy == .allowlist ? allowedApps : blockedApps
         let isListed = list.contains { ApplicationIdentity.matches(application, enrolled: $0) }
-        let shouldBlock = listPolicy == .allowlist ? !isListed : isListed
+        let shouldBlock = listPolicy.shouldBlock(isListed: isListed)
         guard shouldBlock else {
             lastAllowedPID = application.processIdentifier
+            activeBlockedPID = nil
+            shieldController.dismiss()
             return
         }
-        lastBlockedApp = application.localizedName ?? application.bundleIdentifier ?? localized("未知应用", "Unknown app")
-        blockedCount += 1
-        if blockingBehavior == .forceQuit { _ = application.forceTerminate() }
+        let applicationName = application.localizedName ?? application.bundleIdentifier ?? localized("未知应用", "Unknown app")
+        lastBlockedApp = applicationName
+        if activeBlockedPID != application.processIdentifier {
+            activeBlockedPID = application.processIdentifier
+            blockedCount += 1
+        }
+        shieldController.show(applicationName: applicationName, processIdentifier: application.processIdentifier)
+        if blockingBehavior == .forceQuit {
+            _ = application.forceTerminate()
+        } else {
+            hideForFocus(application)
+        }
         reactivateLastAllowedApp()
+    }
+
+    private func hideDisallowedApplications() {
+        guard blockingBehavior == .keepRunning else { return }
+        for application in workspace.runningApplications where !application.isTerminated {
+            guard application.processIdentifier != ProcessInfo.processInfo.processIdentifier else { continue }
+            let list = listPolicy == .allowlist ? allowedApps : blockedApps
+            let isListed = list.contains { ApplicationIdentity.matches(application, enrolled: $0) }
+            if listPolicy.shouldBlock(isListed: isListed) {
+                hideForFocus(application)
+            }
+        }
+    }
+
+    private func hideForFocus(_ application: NSRunningApplication) {
+        let wasHidden = application.isHidden
+        if application.hide(), !wasHidden {
+            hiddenByGuardPIDs.insert(application.processIdentifier)
+        }
+    }
+
+    private func restoreApplicationsHiddenByGuard() {
+        let applications = workspace.runningApplications.filter { hiddenByGuardPIDs.contains($0.processIdentifier) && !$0.isTerminated }
+        hiddenByGuardPIDs.removeAll()
+        applications.forEach { _ = $0.unhide() }
     }
 
     private func reactivateLastAllowedApp() {
         if let pid = lastAllowedPID,
            let application = workspace.runningApplications.first(where: { $0.processIdentifier == pid && !$0.isTerminated }),
            application.processIdentifier != ProcessInfo.processInfo.processIdentifier {
-            _ = application.activate(options: [.activateAllWindows])
+            _ = application.activate(options: [.activateAllWindows, .activateIgnoringOtherApps])
         } else {
             NSApp.activate(ignoringOtherApps: true)
-            NSApp.windows.first?.makeKeyAndOrderFront(nil)
+            NSApp.windows.first(where: { !($0 is FocusShieldPanel) && $0.canBecomeMain })?.makeKeyAndOrderFront(nil)
         }
     }
 
@@ -766,16 +1094,6 @@ final class TimerStore: ObservableObject {
         saveGeneralState()
     }
 
-    func finishCurrentRound() {
-        guard phase == .running, !completionInProgress else { return }
-        completionInProgress = true
-        Task { await completeCurrentRound() }
-    }
-
-    func emergencyEndStrictSession() {
-        lifecycleTask = Task { await transitionToIdle(resetClock: true, allowLocked: true) }
-    }
-
     func prepareForTermination() async -> Bool {
         lifecycleGeneration = UUID()
         let pending = lifecycleTask
@@ -802,7 +1120,11 @@ final class TimerStore: ObservableObject {
         session = SessionJournal(id: generation, mode: mode, plannedSeconds: planned, deadline: nil, selectedTaskID: selectedTaskID, strictApps: strictApps, strictWebsites: strictWebsites)
         saveSession()
 
-        if strictApps { _ = focusGuard.startMonitoring() }
+        if strictApps, !focusGuard.startMonitoring() {
+            clearSession()
+            phase = .idle
+            return
+        }
         if strictWebsites {
             let success = await focusGuard.applyWebsiteRules()
             guard lifecycleGeneration == generation, !Task.isCancelled else {
@@ -824,8 +1146,8 @@ final class TimerStore: ObservableObject {
         saveSession()
     }
 
-    private func transitionToIdle(resetClock: Bool, allowLocked: Bool = false) async {
-        guard allowLocked || !isStrictlyLocked else { return }
+    private func transitionToIdle(resetClock: Bool) async {
+        guard !isStrictlyLocked else { return }
         lifecycleGeneration = UUID()
         phase = .cleaning
         focusGuard.stopMonitoring()

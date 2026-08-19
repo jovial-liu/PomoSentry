@@ -70,7 +70,7 @@ struct OnboardingView: View {
             VStack(alignment: .leading, spacing: 12) {
                 OnboardingPoint(icon: "timer", title: "原生番茄计时", detail: "专注、短休息和长休息自动衔接。")
                 OnboardingPoint(icon: "checklist", title: "任务与进度", detail: "选择当前任务，记录每个任务投入的番茄数。")
-                OnboardingPoint(icon: "lock.shield.fill", title: "严格白名单", detail: "非白名单 App 无法切到前台，但可以继续在后台运行。")
+                OnboardingPoint(icon: "lock.shield.fill", title: "严格白名单", detail: "非白名单窗口会隐藏并显示黑色拦截页，但 App 继续在后台运行。")
             }
             .padding(18)
             .liquidGlass(cornerRadius: 16, tint: Color.mint.opacity(0.16))
@@ -187,8 +187,6 @@ struct Sidebar: View {
 struct GuardPanel: View {
     @ObservedObject var store: TimerStore
     @ObservedObject var focusGuard: FocusGuard
-    @State private var showEmergencyEnd = false
-    @State private var confirmationText = ""
     @AppStorage("appLanguage") private var appLanguage = "zh-Hans"
 
     var body: some View {
@@ -221,13 +219,26 @@ struct GuardPanel: View {
                         Toggle("", isOn: Binding(get: { focusGuard.isEnabled }, set: { focusGuard.setEnabled($0) }))
                             .toggleStyle(.switch)
                             .labelsHidden()
-                            .disabled(store.isRunning)
+                            .disabled(store.isRunning || store.isPreparing)
                     }
 
-                    if !focusGuard.lastBlockedApp.isEmpty {
+                    if !focusGuard.lastBlockedApp.isEmpty && !focusGuard.inputPermissionRequired {
                         Label("已拦截：\(focusGuard.lastBlockedApp)（本轮 \(focusGuard.blockedCount) 次）", systemImage: "hand.raised.fill")
                             .font(.system(size: 12, weight: .semibold))
                             .foregroundStyle(Color.tomato)
+                    }
+
+                    if focusGuard.inputPermissionRequired {
+                        HStack {
+                            Label("严格拦截需要辅助功能权限；未授权时不会开始计时。", systemImage: "exclamationmark.shield.fill")
+                                .font(.system(size: 11, weight: .semibold))
+                                .foregroundStyle(Color.orange)
+                            Spacer()
+                            Button("打开系统设置") { focusGuard.openAccessibilitySettings() }
+                                .buttonStyle(.plain)
+                                .font(.system(size: 11, weight: .bold))
+                                .foregroundStyle(Color.tomato)
+                        }
                     }
 
                     HStack {
@@ -249,7 +260,7 @@ struct GuardPanel: View {
                         }
                         .pickerStyle(.segmented)
                     }
-                    .disabled(store.isRunning)
+                    .disabled(store.isRunning || store.isPreparing)
 
                     VStack(alignment: .leading, spacing: 8) {
                         Text("拦截方式")
@@ -261,9 +272,9 @@ struct GuardPanel: View {
                         }
                         .pickerStyle(.segmented)
                     }
-                    .disabled(store.isRunning)
+                    .disabled(store.isRunning || store.isPreparing)
                     Text(focusGuard.blockingBehavior == .keepRunning
-                         ? "被拦截的 App 会继续在后台运行和联网，但无法切换到前台使用。"
+                         ? "非白名单窗口会被隐藏；点击时整屏变黑且输入不会送达，App 继续在后台运行和联网。"
                          : "强制退出可能导致其他 App 中未保存的内容丢失，请在开始专注前保存工作。")
                         .font(.system(size: 10))
                         .foregroundStyle(focusGuard.blockingBehavior == .keepRunning ? Color.ink.opacity(0.5) : Color.orange)
@@ -279,10 +290,9 @@ struct GuardPanel: View {
                     }
 
                     if store.isStrictlyLocked {
-                        Button("紧急结束严格专注") { showEmergencyEnd = true }
-                            .buttonStyle(.plain)
+                        Label("严格专注已锁定，将在倒计时结束后自动解除。", systemImage: "lock.fill")
                             .font(.system(size: 11, weight: .semibold))
-                            .foregroundStyle(Color.tomato)
+                            .foregroundStyle(Color.ink.opacity(0.58))
                     }
                 }
                 .padding(22)
@@ -308,7 +318,7 @@ struct GuardPanel: View {
                         .buttonStyle(.plain)
                         .font(.system(size: 12, weight: .semibold))
                         .foregroundStyle(Color.tomato)
-                        .disabled(store.isRunning)
+                        .disabled(store.isRunning || store.isPreparing)
                     }
 
                     VStack(spacing: 0) {
@@ -320,7 +330,7 @@ struct GuardPanel: View {
                                 .padding(.vertical, 14)
                         }
                         ForEach(focusGuard.displayedApps) { app in
-                            AllowedAppRow(app: app, canRemove: !store.isRunning && (focusGuard.listPolicy == .blocklist || app.bundleID != "app.pomosentry.mac"), focusGuard: focusGuard)
+                            AllowedAppRow(app: app, canRemove: !store.isRunning && !store.isPreparing && (focusGuard.listPolicy == .blocklist || app.bundleID != "app.pomosentry.mac"), focusGuard: focusGuard)
                             if app.id != focusGuard.displayedApps.last?.id { Divider().padding(.leading, 38) }
                         }
                     }
@@ -346,32 +356,6 @@ struct GuardPanel: View {
             .frame(maxWidth: .infinity, alignment: .top)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .sheet(isPresented: $showEmergencyEnd) {
-            VStack(alignment: .leading, spacing: 16) {
-                Text("确定结束严格专注？")
-                    .font(.system(size: 20, weight: .bold, design: .rounded))
-                Text("为了避免冲动退出，请输入下面的确认文字。")
-                    .font(.system(size: 12))
-                    .foregroundStyle(Color.ink.opacity(0.55))
-                TextField(localized("结束专注", "END FOCUS", language: appLanguage), text: $confirmationText)
-                    .textFieldStyle(.roundedBorder)
-                HStack {
-                    Button("继续专注") {
-                        confirmationText = ""
-                        showEmergencyEnd = false
-                    }
-                    Spacer()
-                    Button("确认结束") {
-                        store.emergencyEndStrictSession()
-                        confirmationText = ""
-                        showEmergencyEnd = false
-                    }
-                    .disabled(confirmationText != localized("结束专注", "END FOCUS", language: appLanguage))
-                }
-            }
-            .padding(24)
-            .frame(width: 390)
-        }
     }
 }
 
