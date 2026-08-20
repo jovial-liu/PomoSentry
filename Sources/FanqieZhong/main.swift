@@ -11,6 +11,8 @@ struct ContentView: View {
 
     var body: some View {
         ZStack {
+            Color.appBackground
+                .ignoresSafeArea()
             LiquidBackdrop()
                 .allowsHitTesting(false)
             HStack(spacing: 0) {
@@ -25,14 +27,10 @@ struct ContentView: View {
                         MainPanel(store: store)
                     }
                 }
-                .id(selectedSection)
-                .transition(.opacity.combined(with: .scale(scale: 0.995, anchor: .center)))
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .animation(.snappy(duration: 0.18, extraBounce: 0), value: selectedSection)
-        .preferredColorScheme(.light)
         .onReceive(timer) { _ in store.tick() }
         .sheet(isPresented: Binding(get: { !didCompleteOnboarding }, set: { if !$0 { didCompleteOnboarding = true } })) {
             OnboardingView(store: store) { didCompleteOnboarding = true }
@@ -131,15 +129,18 @@ struct Sidebar: View {
             Text("工作台")
                 .sectionLabel()
                 .padding(.bottom, 9)
-            SidebarItem(title: "今天", icon: "sun.max.fill", count: store.tasks.filter { !$0.isDone }.count, selected: selectedSection == "今天") {
+            SidebarItem(title: "今天", icon: "sun.max.fill", count: store.todayTasks.filter { !$0.isDone }.count, selected: selectedSection == "今天") {
                 selectSection("今天")
             }
+            .keyboardShortcut("1", modifiers: .command)
             SidebarItem(title: "全部任务", icon: "checklist", selected: selectedSection == "全部任务") {
                 selectSection("全部任务")
             }
+            .keyboardShortcut("2", modifiers: .command)
             SidebarItem(title: "应用与网站", icon: "lock.shield.fill", count: store.focusGuard.displayedApps.count, selected: selectedSection == "学霸白名单") {
                 selectSection("学霸白名单")
             }
+            .keyboardShortcut("3", modifiers: .command)
 
             Spacer()
 
@@ -161,11 +162,34 @@ struct Sidebar: View {
                         .font(.system(size: 12, weight: .medium))
                         .foregroundStyle(Color.ink.opacity(0.55))
                 }
-                ProgressView(value: min(Double(store.completedPomodoros) / 8.0, 1))
+                ProgressView(value: min(Double(store.completedPomodoros) / Double(store.dailyGoal), 1))
                     .tint(Color.tomato)
-                Text("目标 8 个 · 慢慢来就很好")
-                    .font(.system(size: 11))
-                    .foregroundStyle(Color.ink.opacity(0.48))
+                HStack(spacing: 4) {
+                    Text(localized("目标 \(store.dailyGoal) 个", "Goal: \(store.dailyGoal)", language: appLanguage))
+                        .font(.system(size: 11))
+                        .foregroundStyle(Color.ink.opacity(0.48))
+                    Spacer(minLength: 4)
+                    Stepper("", value: Binding(get: { store.dailyGoal }, set: { store.setDailyGoal($0) }), in: 1...24)
+                        .labelsHidden()
+                        .controlSize(.mini)
+                        .help(localized("设置每日番茄目标", "Set daily session goal", language: appLanguage))
+                        .accessibilityLabel(localized("每日番茄目标", "Daily session goal", language: appLanguage))
+                        .accessibilityValue("\(store.dailyGoal)")
+                }
+                HStack(spacing: 6) {
+                    Image(systemName: store.soundEnabled ? "speaker.wave.2.fill" : "speaker.slash.fill")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundStyle(Color.ink.opacity(0.42))
+                    Text(localized("完成提示音", "Completion sound", language: appLanguage))
+                        .font(.system(size: 10))
+                        .foregroundStyle(Color.ink.opacity(0.48))
+                    Spacer(minLength: 4)
+                    Toggle("", isOn: Binding(get: { store.soundEnabled }, set: { store.setSoundEnabled($0) }))
+                        .toggleStyle(.switch)
+                        .controlSize(.mini)
+                        .labelsHidden()
+                        .accessibilityLabel(localized("完成提示音", "Completion sound", language: appLanguage))
+                }
             }
             .padding(16)
             .liquidGlass(cornerRadius: 16, tint: Color.mint.opacity(0.2))
@@ -178,9 +202,7 @@ struct Sidebar: View {
 
     private func selectSection(_ section: String) {
         guard selectedSection != section else { return }
-        withAnimation(.snappy(duration: 0.18, extraBounce: 0)) {
-            selectedSection = section
-        }
+        selectedSection = section
     }
 }
 
@@ -195,6 +217,7 @@ struct GuardPanel: View {
                 VStack(alignment: .leading, spacing: 6) {
                     Text("应用与网站")
                         .font(.system(size: 28, weight: .bold, design: .rounded))
+                        .accessibilityAddTraits(.isHeader)
                     Text("浏览器可以加入 App 黑白名单；指定域名可单独拦截，浏览器仍在后台运行。")
                         .font(.system(size: 13))
                         .foregroundStyle(Color.ink.opacity(0.56))
@@ -219,16 +242,27 @@ struct GuardPanel: View {
                         Toggle("", isOn: Binding(get: { focusGuard.isEnabled }, set: { focusGuard.setEnabled($0) }))
                             .toggleStyle(.switch)
                             .labelsHidden()
-                            .disabled(store.isRunning || store.isPreparing)
+                            .accessibilityLabel(localized("严格专注模式", "Strict Focus Mode", language: appLanguage))
+                            .disabled(store.phase != .idle)
                     }
 
                     if !focusGuard.lastBlockedApp.isEmpty && !focusGuard.inputPermissionRequired {
-                        Label("已拦截：\(focusGuard.lastBlockedApp)（本轮 \(focusGuard.blockedCount) 次）", systemImage: "hand.raised.fill")
+                        Label(localized("已拦截：\(focusGuard.lastBlockedApp)（本轮 \(focusGuard.blockedCount) 次）",
+                                        "Blocked: \(focusGuard.lastBlockedApp) (\(focusGuard.blockedCount) this round)",
+                                        language: appLanguage),
+                              systemImage: "hand.raised.fill")
                             .font(.system(size: 12, weight: .semibold))
                             .foregroundStyle(Color.tomato)
                     }
 
-                    if focusGuard.inputPermissionRequired {
+                    if !focusGuard.inputProtectionWarning.isEmpty {
+                        Label(focusGuard.inputProtectionWarning, systemImage: "exclamationmark.shield.fill")
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundStyle(Color.orange)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+
+                    if focusGuard.isEnabled && (!focusGuard.accessibilityGranted || focusGuard.inputPermissionRequired) {
                         VStack(alignment: .leading, spacing: 9) {
                             Label("严格拦截需要辅助功能权限；未授权时不会开始计时。", systemImage: "exclamationmark.shield.fill")
                                 .font(.system(size: 11, weight: .semibold))
@@ -265,7 +299,7 @@ struct GuardPanel: View {
                         }
                         .pickerStyle(.segmented)
                     }
-                    .disabled(store.isRunning || store.isPreparing)
+                    .disabled(store.phase != .idle)
 
                     VStack(alignment: .leading, spacing: 8) {
                         Text("拦截方式")
@@ -277,25 +311,37 @@ struct GuardPanel: View {
                         }
                         .pickerStyle(.segmented)
                     }
-                    .disabled(store.isRunning || store.isPreparing)
-                    Text(focusGuard.blockingBehavior == .keepRunning
-                         ? "非白名单窗口会被隐藏；点击时整屏变黑且输入不会送达，App 继续在后台运行和联网。"
-                         : "强制退出可能导致其他 App 中未保存的内容丢失，请在开始专注前保存工作。")
+                    .disabled(store.phase != .idle)
+                    Text(localized(
+                        focusGuard.blockingBehavior == .keepRunning
+                            ? "非白名单窗口会被隐藏；点击时整屏变黑且输入不会送达，App 继续在后台运行和联网。"
+                            : "强制退出可能导致其他 App 中未保存的内容丢失，请在开始专注前保存工作。",
+                        focusGuard.blockingBehavior == .keepRunning
+                            ? "Non-allowlisted windows are hidden; clicks show a black screen and input is not delivered while the app keeps running and connected."
+                            : "Force quit may discard unsaved work in other apps. Save before starting focus.",
+                        language: appLanguage
+                    ))
                         .font(.system(size: 10))
                         .foregroundStyle(focusGuard.blockingBehavior == .keepRunning ? Color.ink.opacity(0.5) : Color.orange)
 
-                    Label("会话会在重新打开后恢复；但电脑所有者始终可以强制结束普通用户 App。", systemImage: "info.circle")
+                    Label(localized("会话会在重新打开后恢复；但电脑所有者始终可以强制结束普通用户 App。",
+                                    "Sessions resume after relaunch, but the computer owner can always force-terminate an ordinary user app.",
+                                    language: appLanguage), systemImage: "info.circle")
                         .font(.system(size: 10))
                         .foregroundStyle(Color.ink.opacity(0.48))
 
                     if focusGuard.listPolicy == .blocklist {
-                        Label("Safari、Chrome、Edge、Arc 等浏览器都可以直接加入黑名单。", systemImage: "globe")
+                        Label(localized("Safari、Chrome、Edge、Arc 等浏览器都可以直接加入黑名单。",
+                                        "Safari, Chrome, Edge, Arc, and other browsers can be added directly to the blocklist.",
+                                        language: appLanguage), systemImage: "globe")
                             .font(.system(size: 11, weight: .medium))
                             .foregroundStyle(Color.ink.opacity(0.58))
                     }
 
                     if store.isStrictlyLocked {
-                        Label("严格专注已锁定，将在倒计时结束后自动解除。", systemImage: "lock.fill")
+                        Label(localized("严格专注已锁定，将在倒计时结束后自动解除。",
+                                        "Strict focus is locked and will end automatically when the countdown finishes.",
+                                        language: appLanguage), systemImage: "lock.fill")
                             .font(.system(size: 11, weight: .semibold))
                             .foregroundStyle(Color.ink.opacity(0.58))
                     }
@@ -304,38 +350,36 @@ struct GuardPanel: View {
                 .liquidGlass(cornerRadius: 20, tint: focusGuard.isEnabled ? Color.mint.opacity(0.18) : nil)
 
                 VStack(alignment: .leading, spacing: 15) {
-                    HStack {
-                        VStack(alignment: .leading, spacing: 3) {
-                            Text(localized(focusGuard.listPolicy == .allowlist ? "允许使用的 App" : "禁止使用的 App",
-                                           focusGuard.listPolicy == .allowlist ? "Allowed Apps" : "Blocked Apps",
-                                           language: appLanguage))
-                                .font(.system(size: 18, weight: .bold, design: .rounded))
-                            Text(localized(focusGuard.listPolicy == .allowlist ? "专注时只有这些 App 可以切到前台" : "专注时这些 App 无法切到前台，但仍可在后台运行",
-                                           focusGuard.listPolicy == .allowlist ? "Only these apps can come to the foreground during focus." : "These apps cannot come to the foreground, but keep running in the background.",
-                                           language: appLanguage))
-                                .font(.system(size: 12))
-                                .foregroundStyle(Color.ink.opacity(0.48))
+                    ViewThatFits(in: .horizontal) {
+                        HStack {
+                            appListTitle
+                            Spacer(minLength: 12)
+                            addAppButton
                         }
-                        Spacer()
-                        Button { focusGuard.addApplication() } label: {
-                            Label("添加 App", systemImage: "plus")
+                        VStack(alignment: .leading, spacing: 10) {
+                            appListTitle
+                            addAppButton
                         }
-                        .buttonStyle(.plain)
-                        .font(.system(size: 12, weight: .semibold))
-                        .foregroundStyle(Color.tomato)
-                        .disabled(store.isRunning || store.isPreparing)
+                    }
+
+                    if !focusGuard.applicationStatus.isEmpty {
+                        Label(focusGuard.applicationStatus, systemImage: "info.circle")
+                            .font(.system(size: 11, weight: .medium))
+                            .foregroundStyle(Color.ink.opacity(0.56))
                     }
 
                     VStack(spacing: 0) {
                         if focusGuard.displayedApps.isEmpty {
-                            Text("名单为空，点击右上角添加 App")
+                            Text(localized("名单为空，点击右上角添加 App",
+                                           "This list is empty. Add an app using the button above.",
+                                           language: appLanguage))
                                 .font(.system(size: 12))
                                 .foregroundStyle(Color.ink.opacity(0.42))
                                 .frame(maxWidth: .infinity, alignment: .leading)
                                 .padding(.vertical, 14)
                         }
                         ForEach(focusGuard.displayedApps) { app in
-                            AllowedAppRow(app: app, canRemove: !store.isRunning && !store.isPreparing && (focusGuard.listPolicy == .blocklist || app.bundleID != "app.pomosentry.mac"), focusGuard: focusGuard)
+                            AllowedAppRow(app: app, canRemove: store.phase == .idle && (focusGuard.listPolicy == .blocklist || app.bundleID != "app.pomosentry.mac"), focusGuard: focusGuard)
                             if app.id != focusGuard.displayedApps.last?.id { Divider().padding(.leading, 38) }
                         }
                     }
@@ -361,12 +405,38 @@ struct GuardPanel: View {
             .frame(maxWidth: .infinity, alignment: .top)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .onAppear { focusGuard.refreshAccessibilityPermission() }
+    }
+
+    private var appListTitle: some View {
+        VStack(alignment: .leading, spacing: 3) {
+            Text(localized(focusGuard.listPolicy == .allowlist ? "允许使用的 App" : "禁止使用的 App",
+                           focusGuard.listPolicy == .allowlist ? "Allowed Apps" : "Blocked Apps",
+                           language: appLanguage))
+                .font(.system(size: 18, weight: .bold, design: .rounded))
+            Text(localized(focusGuard.listPolicy == .allowlist ? "专注时只有这些 App 可以切到前台" : "专注时这些 App 无法切到前台，但仍可在后台运行",
+                           focusGuard.listPolicy == .allowlist ? "Only these apps can come to the foreground during focus." : "These apps cannot come to the foreground, but keep running in the background.",
+                           language: appLanguage))
+                .font(.system(size: 12))
+                .foregroundStyle(Color.ink.opacity(0.48))
+        }
+    }
+
+    private var addAppButton: some View {
+        Button { focusGuard.addApplication() } label: {
+            Label("添加 App", systemImage: "plus")
+        }
+        .buttonStyle(.plain)
+        .font(.system(size: 12, weight: .semibold))
+        .foregroundStyle(Color.tomato)
+        .disabled(store.phase != .idle)
     }
 }
 
 struct WebsiteRulesCard: View {
     @ObservedObject var store: TimerStore
     @ObservedObject var focusGuard: FocusGuard
+    @AppStorage("appLanguage") private var appLanguage = "zh-Hans"
     @State private var domainInput = ""
     @State private var invalidInput = false
 
@@ -384,6 +454,7 @@ struct WebsiteRulesCard: View {
                 VStack(alignment: .leading, spacing: 3) {
                     Text("网站域名黑名单")
                         .font(.system(size: 18, weight: .bold, design: .rounded))
+                        .accessibilityAddTraits(.isHeader)
                     Text("浏览器保持后台运行，只拦截已添加的精确域名")
                         .font(.system(size: 12))
                         .foregroundStyle(Color.ink.opacity(0.48))
@@ -392,7 +463,8 @@ struct WebsiteRulesCard: View {
                 Toggle("", isOn: Binding(get: { focusGuard.websiteBlockingEnabled }, set: { focusGuard.setWebsiteBlockingEnabled($0) }))
                     .toggleStyle(.switch)
                     .labelsHidden()
-                    .disabled(store.isRunning || store.isPreparing)
+                    .accessibilityLabel("网站域名黑名单")
+                    .disabled(store.phase != .idle)
             }
 
             HStack(spacing: 9) {
@@ -409,7 +481,7 @@ struct WebsiteRulesCard: View {
             .padding(.horizontal, 13)
             .frame(height: 42)
             .liquidGlass(cornerRadius: 12, tint: invalidInput ? Color.red.opacity(0.16) : Color.white.opacity(0.12), interactive: true)
-            .disabled(store.isRunning || store.isPreparing)
+            .disabled(store.phase != .idle)
 
             if invalidInput {
                 Text("请输入有效域名。网页路径会自动提取主机名；不同子域名请分别添加。")
@@ -438,7 +510,8 @@ struct WebsiteRulesCard: View {
                                     .foregroundStyle(Color.ink.opacity(0.35))
                             }
                             .buttonStyle(.plain)
-                            .disabled(store.isRunning || store.isPreparing)
+                            .accessibilityLabel(localized("移除网站 \(domain)", "Remove website \(domain)", language: nil))
+                            .disabled(store.phase != .idle)
                         }
                         .padding(.horizontal, 10)
                         .frame(height: 32)
@@ -447,21 +520,15 @@ struct WebsiteRulesCard: View {
                 }
             }
 
-            HStack(spacing: 8) {
-                Image(systemName: focusGuard.websiteRulesActive ? "checkmark.shield.fill" : "info.circle.fill")
-                    .foregroundStyle(focusGuard.websiteRulesActive ? Color.green : Color.orange)
-                Text(focusGuard.websiteStatus.isEmpty
-                     ? "开始和结束时 macOS 会分别请求管理员确认；每次操作后都会验证真实系统状态。"
-                     : focusGuard.websiteStatus)
-                    .font(.system(size: 10))
-                    .foregroundStyle(Color.ink.opacity(0.52))
-                Spacer()
-                if focusGuard.websiteRulesActive {
-                    Button("立即清除") { Task { await focusGuard.clearWebsiteRules() } }
-                        .buttonStyle(.plain)
-                        .font(.system(size: 10, weight: .semibold))
-                        .foregroundStyle(Color.tomato)
-                        .disabled(focusGuard.isWebsiteOperationInProgress)
+            ViewThatFits(in: .horizontal) {
+                HStack(spacing: 8) {
+                    websiteStatusContent
+                    Spacer(minLength: 8)
+                    clearWebsiteButton
+                }
+                VStack(alignment: .leading, spacing: 8) {
+                    websiteStatusContent
+                    clearWebsiteButton
                 }
             }
         }
@@ -475,6 +542,32 @@ struct WebsiteRulesCard: View {
             invalidInput = false
         } else {
             invalidInput = true
+        }
+    }
+
+    private var websiteStatusContent: some View {
+        HStack(spacing: 8) {
+            Image(systemName: focusGuard.websiteRulesActive ? "checkmark.shield.fill" : "info.circle.fill")
+                .foregroundStyle(focusGuard.websiteRulesActive ? Color.green : Color.orange)
+            Text(focusGuard.websiteStatus.isEmpty
+                 ? localized("开始和结束时 macOS 会分别请求管理员确认；每次操作后都会验证真实系统状态。",
+                             "macOS asks for administrator approval at start and finish; the real system state is verified after every operation.",
+                             language: appLanguage)
+                 : focusGuard.websiteStatus)
+                .font(.system(size: 10))
+                .foregroundStyle(Color.ink.opacity(0.52))
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    @ViewBuilder
+    private var clearWebsiteButton: some View {
+        if focusGuard.websiteRulesActive {
+            Button("立即清除") { Task { await focusGuard.clearWebsiteRules() } }
+                .buttonStyle(.plain)
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundStyle(Color.tomato)
+                .disabled(focusGuard.isWebsiteOperationInProgress || store.phase != .idle)
         }
     }
 }
@@ -507,6 +600,7 @@ struct AllowedAppRow: View {
                         .foregroundStyle(Color.ink.opacity(0.28))
                 }
                 .buttonStyle(.plain)
+                .accessibilityLabel(localized("移除 App \(app.name)", "Remove app \(app.name)", language: nil))
             }
         }
         .padding(.vertical, 10)
@@ -519,6 +613,7 @@ struct SidebarItem: View {
     var count: Int? = nil
     let selected: Bool
     let action: () -> Void
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var isHovering = false
 
     var body: some View {
@@ -545,9 +640,10 @@ struct SidebarItem: View {
         }
         .buttonStyle(.plain)
         .contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .accessibilityAddTraits(selected ? .isSelected : [])
         .onHover { hovering in isHovering = hovering }
-        .animation(.easeOut(duration: 0.10), value: isHovering)
-        .animation(.easeOut(duration: 0.14), value: selected)
+        .animation(reduceMotion ? nil : .easeOut(duration: 0.10), value: isHovering)
+        .animation(reduceMotion ? nil : .easeOut(duration: 0.14), value: selected)
     }
 }
 
@@ -558,25 +654,15 @@ struct MainPanel: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 22) {
-                HStack(alignment: .top) {
-                    VStack(alignment: .leading, spacing: 6) {
-                        Label("FOCUS STUDIO", systemImage: "sparkles")
-                            .font(.system(size: 9, weight: .bold, design: .rounded))
-                            .tracking(1.4)
-                            .foregroundStyle(Color.tomato)
-                            .padding(.horizontal, 10)
-                            .frame(height: 24)
-                            .background(Color.tomato.opacity(0.10), in: Capsule())
-                        Text(greeting)
-                            .font(.system(size: 31, weight: .bold, design: .rounded))
-                        Text("准备好把今天过得更专注一点了吗？")
-                            .font(.system(size: 13))
-                            .foregroundStyle(Color.ink.opacity(0.56))
+                ViewThatFits(in: .horizontal) {
+                    HStack(alignment: .top) {
+                        greetingBlock
+                        Spacer(minLength: 16)
+                        statsBlock
                     }
-                    Spacer()
-                    HStack(spacing: 12) {
-                        StatPill(value: "\(store.completedPomodoros)", label: "已完成", icon: "checkmark.seal.fill", color: .mint)
-                        StatPill(value: "\(store.tasks.filter { !$0.isDone }.count)", label: "待处理", icon: "circle.dotted", color: .peach)
+                    VStack(alignment: .leading, spacing: 14) {
+                        greetingBlock
+                        statsBlock
                     }
                 }
 
@@ -596,6 +682,33 @@ struct MainPanel: View {
         if hour < 18 { return localized("下午好，给自己一个专注时段", "Good afternoon. Make room for deep focus.", language: appLanguage) }
         return localized("晚上好，收好今天的最后一点能量", "Good evening. Finish the day with intention.", language: appLanguage)
     }
+
+    private var greetingBlock: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Label("FOCUS STUDIO", systemImage: "sparkles")
+                .font(.system(size: 9, weight: .bold, design: .rounded))
+                .tracking(1.4)
+                .foregroundStyle(Color.tomato)
+                .padding(.horizontal, 10)
+                .frame(height: 24)
+                .background(Color.tomato.opacity(0.10), in: Capsule())
+            Text(greeting)
+                .font(.system(size: 31, weight: .bold, design: .rounded))
+                .accessibilityAddTraits(.isHeader)
+            Text(localized("准备好把今天过得更专注一点了吗？",
+                           "Ready to make today more focused?",
+                           language: appLanguage))
+                .font(.system(size: 13))
+                .foregroundStyle(Color.ink.opacity(0.56))
+        }
+    }
+
+    private var statsBlock: some View {
+        HStack(spacing: 12) {
+            StatPill(value: "\(store.completedPomodoros)", label: "已完成", icon: "checkmark.seal.fill", color: .mint)
+            StatPill(value: "\(store.todayTasks.filter { !$0.isDone }.count)", label: "待处理", icon: "circle.dotted", color: .peach)
+        }
+    }
 }
 
 struct AllTasksPanel: View {
@@ -612,6 +725,7 @@ struct AllTasksPanel: View {
                         .foregroundStyle(Color.tomato)
                     Text(localized("全部任务", "All Tasks", language: appLanguage))
                         .font(.system(size: 31, weight: .bold, design: .rounded))
+                        .accessibilityAddTraits(.isHeader)
                     Text(localized("集中查看所有任务；“今天”只显示今天和未安排日期的任务。", "Review every task in one place; Today shows today's and unscheduled tasks.", language: appLanguage))
                         .font(.system(size: 13))
                         .foregroundStyle(Color.ink.opacity(0.56))
@@ -642,13 +756,14 @@ struct StatPill: View {
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 10)
-        .liquidGlass(cornerRadius: 12, tint: color.opacity(0.32), interactive: true)
+        .liquidGlass(cornerRadius: 12, tint: color.opacity(0.32))
     }
 }
 
 struct TimerCard: View {
     @ObservedObject var store: TimerStore
     @AppStorage("appLanguage") private var appLanguage = "zh-Hans"
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         VStack(spacing: 24) {
@@ -657,109 +772,210 @@ struct TimerCard: View {
             }
             .pickerStyle(.segmented)
             .frame(width: 330)
-            .disabled(store.isRunning || store.isPreparing)
+            .disabled(store.phase != .idle)
 
-            if store.mode == .focus {
+            ViewThatFits(in: .horizontal) {
                 HStack(spacing: 8) {
-                    Label("专注时长", systemImage: "slider.horizontal.3")
-                        .font(.system(size: 11, weight: .semibold))
-                        .foregroundStyle(Color.ink.opacity(0.62))
-                    ForEach([25, 45, 60, 90], id: \.self) { minutes in
-                        Button("\(minutes)") { store.setFocusMinutes(minutes) }
-                            .buttonStyle(.plain)
-                            .font(.system(size: 11, weight: .semibold, design: .rounded))
-                            .padding(.horizontal, 10)
-                            .frame(height: 28)
-                            .background(store.focusMinutes == minutes ? Color.tomato.opacity(0.18) : Color.white.opacity(0.42), in: Capsule())
-                    }
+                    durationLabelView
+                    durationButtons
                     Divider().frame(height: 20)
-                    Stepper(value: Binding(get: { store.focusMinutes }, set: { store.setFocusMinutes($0) }), in: 1...240) {
-                        Text(localized("\(store.focusMinutes) 分钟", "\(store.focusMinutes) min", language: appLanguage))
-                            .font(.system(size: 11, weight: .semibold, design: .rounded))
-                            .monospacedDigit()
-                            .frame(minWidth: 66, alignment: .trailing)
-                    }
-                    .fixedSize()
+                    durationStepper
                 }
-                .padding(.horizontal, 12)
-                .frame(height: 40)
-                .liquidGlass(cornerRadius: 13, tint: Color.white.opacity(0.12), interactive: true)
-                .disabled(store.isRunning || store.isPreparing)
-                .help("自由调节 1–240 分钟")
+                VStack(alignment: .leading, spacing: 7) {
+                    durationLabelView
+                    HStack(spacing: 8) {
+                        durationButtons
+                        Spacer(minLength: 4)
+                        durationStepper
+                    }
+                }
             }
+            .padding(.horizontal, 12)
+            .frame(minHeight: 40)
+            .liquidGlass(cornerRadius: 13, tint: Color.white.opacity(0.12), interactive: true)
+            .disabled(store.phase != .idle)
+            .help(localized("自由调节计时时长", "Adjust timer duration", language: appLanguage))
 
-            HStack(spacing: 50) {
-                ZStack {
-                    Circle().fill(Color.white.opacity(0.22))
-                    Circle().stroke(Color.white.opacity(0.90), lineWidth: 14)
-                    Circle()
-                        .trim(from: 0, to: max(store.progress, 0.001))
-                        .stroke(store.mode.tint, style: StrokeStyle(lineWidth: 14, lineCap: .round))
-                        .rotationEffect(.degrees(-90))
-                        .animation(.easeInOut(duration: 0.25), value: store.progress)
-                        .shadow(color: store.mode.tint.opacity(0.38), radius: 10)
-                    VStack(spacing: 5) {
-                        Text(store.timeString)
-                            .font(.system(size: 59, weight: .bold, design: .rounded))
-                            .monospacedDigit()
-                            .foregroundStyle(Color.ink)
-                        Text(LocalizedStringKey(store.isRunning ? "进行中" : "准备开始"))
-                            .font(.system(size: 12, weight: .semibold))
-                            .foregroundStyle(Color.ink.opacity(0.48))
-                    }
+            ViewThatFits(in: .horizontal) {
+                HStack(spacing: 50) {
+                    timerDial
+                    timerDetails
                 }
-                .frame(width: 220, height: 220)
-                .shadow(color: Color.ink.opacity(0.09), radius: 24, y: 12)
-
-                VStack(alignment: .leading, spacing: 12) {
-                    Text(LocalizedStringKey(store.mode.rawValue))
-                        .font(.system(size: 24, weight: .bold, design: .rounded))
-                    Text(LocalizedStringKey(store.mode.subtitle))
-                        .font(.system(size: 13))
-                        .foregroundStyle(Color.ink.opacity(0.58))
-                        .fixedSize(horizontal: false, vertical: true)
-                    if let task = store.tasks.first(where: { $0.id == store.selectedTaskID }) {
-                        Label(task.title, systemImage: "link")
-                            .font(.system(size: 12, weight: .medium))
-                            .foregroundStyle(Color.ink.opacity(0.7))
-                            .lineLimit(2)
-                    } else {
-                        Text("从下方选择一个任务开始")
-                            .font(.system(size: 12))
-                            .foregroundStyle(Color.ink.opacity(0.42))
-                    }
-                    HStack(spacing: 10) {
-                        Button { store.toggleTimer() } label: {
-                            Text(LocalizedStringKey(store.isPreparing ? "正在准备" : (store.isStrictlyLocked ? "严格专注中" : (store.isRunning ? "暂停" : "开始"))))
-                        }
-                        .buttonStyle(PrimaryButtonStyle())
-                            .disabled(store.isStrictlyLocked || store.isPreparing)
-                        Button { store.resetTimer() } label: {
-                            Image(systemName: "arrow.counterclockwise")
-                        }
-                        .buttonStyle(SecondaryButtonStyle())
-                        .help("重置本轮")
-                        .disabled(store.isStrictlyLocked || store.isPreparing)
-                    }
+                VStack(spacing: 18) {
+                    timerDial
+                    timerDetails
                 }
-                .frame(maxWidth: 230, alignment: .leading)
             }
         }
         .padding(28)
         .frame(maxWidth: .infinity)
-        .background(
-            LinearGradient(
-                colors: [store.mode.tint.opacity(0.16), Color.white.opacity(0.16), Color.lavender.opacity(0.12)],
-                startPoint: .topLeading,
-                endPoint: .bottomTrailing
-            ),
-            in: RoundedRectangle(cornerRadius: 24, style: .continuous)
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 24, style: .continuous)
-                .stroke(LinearGradient(colors: [Color.white.opacity(0.85), Color.white.opacity(0.18)], startPoint: .topLeading, endPoint: .bottomTrailing), lineWidth: 1)
-        )
         .liquidGlass(cornerRadius: 24, tint: store.mode.tint.opacity(0.2))
+    }
+
+    private var timerDial: some View {
+        ZStack {
+            Circle().fill(Color.white.opacity(0.22))
+            Circle().stroke(Color.white.opacity(0.90), lineWidth: 14)
+            Circle()
+                .trim(from: 0, to: max(store.progress, 0.001))
+                .stroke(store.mode.tint, style: StrokeStyle(lineWidth: 14, lineCap: .round))
+                .rotationEffect(.degrees(-90))
+                .animation(reduceMotion ? nil : .easeInOut(duration: 0.25), value: store.progress)
+                .shadow(color: store.mode.tint.opacity(0.38), radius: 10)
+            VStack(spacing: 5) {
+                Text(store.timeString)
+                    .font(.system(size: 59, weight: .bold, design: .rounded))
+                    .monospacedDigit()
+                    .foregroundStyle(Color.ink)
+                Text(store.timerStateTitle(language: appLanguage))
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(Color.ink.opacity(0.48))
+            }
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel(localized("计时器", "Timer", language: appLanguage))
+            .accessibilityValue("\(store.timerStateTitle(language: appLanguage))，\(store.timeString)")
+        }
+        .frame(width: 220, height: 220)
+        .shadow(color: Color.ink.opacity(0.09), radius: 24, y: 12)
+    }
+
+    private var timerDetails: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text(LocalizedStringKey(store.mode.rawValue))
+                .font(.system(size: 24, weight: .bold, design: .rounded))
+            Text(LocalizedStringKey(store.mode.subtitle))
+                .font(.system(size: 13))
+                .foregroundStyle(Color.ink.opacity(0.58))
+                .fixedSize(horizontal: false, vertical: true)
+            if !store.focusGuard.lastProtectionError.isEmpty && !store.isRunning {
+                VStack(alignment: .leading, spacing: 7) {
+                    Label(store.focusGuard.lastProtectionError, systemImage: "exclamationmark.triangle.fill")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(Color.orange)
+                        .fixedSize(horizontal: false, vertical: true)
+                    HStack(spacing: 12) {
+                        if !store.focusGuard.accessibilityGranted {
+                            Button(localized("打开系统设置", "Open System Settings", language: appLanguage)) {
+                                store.focusGuard.openAccessibilitySettings()
+                            }
+                            .buttonStyle(.plain)
+                            .font(.system(size: 10, weight: .semibold))
+                        }
+                        if store.canRetryProtection {
+                            Button(localized("重试", "Retry", language: appLanguage)) {
+                                store.retryProtectionSetup()
+                            }
+                            .buttonStyle(.plain)
+                            .font(.system(size: 10, weight: .semibold))
+                        }
+                    }
+                    .foregroundStyle(Color.tomato)
+                }
+                .accessibilityElement(children: .contain)
+            }
+            if let task = store.tasks.first(where: { $0.id == store.selectedTaskID }) {
+                Label(task.title, systemImage: "link")
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(Color.ink.opacity(0.7))
+                    .lineLimit(2)
+            } else {
+                Text("从下方选择一个任务开始")
+                    .font(.system(size: 12))
+                    .foregroundStyle(Color.ink.opacity(0.42))
+            }
+            HStack(spacing: 10) {
+                Button { store.toggleTimer() } label: {
+                    Text(store.primaryActionTitle(language: appLanguage))
+                }
+                .buttonStyle(PrimaryButtonStyle())
+                .keyboardShortcut("p", modifiers: .command)
+                .disabled(store.isStrictlyLocked || store.isPreparing)
+                Button { store.resetTimer() } label: {
+                    Image(systemName: "arrow.counterclockwise")
+                }
+                .buttonStyle(SecondaryButtonStyle())
+                .keyboardShortcut("r", modifiers: .command)
+                .help("重置本轮")
+                .accessibilityLabel(localized("重置本轮", "Reset Round", language: appLanguage))
+                .disabled(store.isStrictlyLocked || store.isPreparing)
+            }
+            if store.canRetryProtection {
+                Button {
+                    store.retryProtectionSetup()
+                } label: {
+                    Label(localized("重试保护设置", "Retry Protection", language: appLanguage), systemImage: "arrow.clockwise")
+                }
+                .buttonStyle(.plain)
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(Color.tomato)
+            }
+        }
+        .frame(maxWidth: 230, alignment: .leading)
+    }
+
+    private var currentMinutes: Int {
+        switch store.mode {
+        case .focus: store.focusMinutes
+        case .shortBreak: store.shortBreakMinutes
+        case .longBreak: store.longBreakMinutes
+        }
+    }
+
+    private var durationPresets: [Int] {
+        switch store.mode {
+        case .focus: [25, 45, 60, 90]
+        case .shortBreak: [5, 10, 15]
+        case .longBreak: [15, 20, 30]
+        }
+    }
+
+    private var durationRange: ClosedRange<Int> {
+        switch store.mode {
+        case .focus: 1...240
+        case .shortBreak: 1...60
+        case .longBreak: 1...120
+        }
+    }
+
+    private var durationLabel: String {
+        switch store.mode {
+        case .focus: localized("专注时长", "Focus Duration", language: appLanguage)
+        case .shortBreak: localized("短休息时长", "Short Break", language: appLanguage)
+        case .longBreak: localized("长休息时长", "Long Break", language: appLanguage)
+        }
+    }
+
+    private var durationLabelView: some View {
+        Label(durationLabel, systemImage: "slider.horizontal.3")
+            .font(.system(size: 11, weight: .semibold))
+            .foregroundStyle(Color.ink.opacity(0.62))
+    }
+
+    private var durationButtons: some View {
+        ForEach(durationPresets, id: \.self) { minutes in
+            Button("\(minutes)") { store.setMinutes(minutes, for: store.mode) }
+                .buttonStyle(.plain)
+                .font(.system(size: 11, weight: .semibold, design: .rounded))
+                .padding(.horizontal, 10)
+                .frame(height: 28)
+                .background(currentMinutes == minutes ? store.mode.tint.opacity(0.22) : Color.white.opacity(0.42), in: Capsule())
+                .accessibilityLabel(localized("\(durationLabel)：\(minutes) 分钟",
+                                              "\(durationLabel): \(minutes) minutes",
+                                              language: appLanguage))
+                .accessibilityValue(currentMinutes == minutes
+                                    ? localized("已选中", "Selected", language: appLanguage)
+                                    : "")
+        }
+    }
+
+    private var durationStepper: some View {
+        Stepper(value: Binding(get: { currentMinutes }, set: { store.setMinutes($0, for: store.mode) }), in: durationRange) {
+            Text(localized("\(currentMinutes) 分钟", "\(currentMinutes) min", language: appLanguage))
+                .font(.system(size: 11, weight: .semibold, design: .rounded))
+                .monospacedDigit()
+                .frame(minWidth: 66, alignment: .trailing)
+        }
+        .fixedSize()
     }
 }
 
@@ -776,7 +992,10 @@ struct TaskCard: View {
                 VStack(alignment: .leading, spacing: 3) {
                     Text(LocalizedStringKey(showsAll ? "全部任务" : "今天的任务"))
                         .font(.system(size: 18, weight: .bold, design: .rounded))
-                    Text("选一个小目标，专注完成它")
+                        .accessibilityAddTraits(.isHeader)
+                    Text(localized("选一个小目标，专注完成它",
+                                   "Choose one small goal and give it your attention.",
+                                   language: appLanguage))
                         .font(.system(size: 12))
                         .foregroundStyle(Color.ink.opacity(0.48))
                 }
@@ -789,6 +1008,27 @@ struct TaskCard: View {
             HStack(spacing: 8) {
                 Image(systemName: "plus")
                     .foregroundStyle(Color.ink.opacity(0.42))
+                Menu {
+                    ForEach(TaskDueChoice.allCases, id: \.self) { choice in
+                        Button {
+                            store.newTaskDueChoice = choice
+                        } label: {
+                            if store.newTaskDueChoice == choice {
+                                Label(taskDueTitle(choice), systemImage: "checkmark")
+                            } else {
+                                Text(taskDueTitle(choice))
+                            }
+                        }
+                    }
+                } label: {
+                    Image(systemName: taskDueIcon(store.newTaskDueChoice))
+                        .foregroundStyle(Color.tomato.opacity(0.82))
+                        .frame(width: 18)
+                }
+                .menuStyle(.borderlessButton)
+                .accessibilityLabel(localized("新任务日期：\(taskDueTitle(store.newTaskDueChoice))",
+                                              "New task date: \(taskDueTitle(store.newTaskDueChoice))",
+                                              language: appLanguage))
                 TextField("添加一个任务…", text: $store.newTaskTitle)
                     .textFieldStyle(.plain)
                     .onSubmit { store.addTask() }
@@ -796,20 +1036,54 @@ struct TaskCard: View {
                     .buttonStyle(.plain)
                     .font(.system(size: 12, weight: .semibold))
                     .foregroundStyle(Color.tomato)
+                    .keyboardShortcut("n", modifiers: .command)
             }
             .padding(.horizontal, 13)
             .frame(height: 38)
             .liquidGlass(cornerRadius: 10, interactive: true)
+            .disabled(store.phase != .idle)
 
             VStack(spacing: 0) {
-                ForEach(visibleTasks) { task in
-                    TaskRow(task: task, selected: task.id == store.selectedTaskID, store: store)
-                    if task.id != visibleTasks.last?.id { Divider().padding(.leading, 38) }
+                if visibleTasks.isEmpty {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Label(localized(showsAll ? "还没有任务" : "今天没有待办任务",
+                                        showsAll ? "No tasks yet" : "No tasks due today",
+                                        language: appLanguage), systemImage: "checkmark.circle")
+                            .font(.system(size: 13, weight: .semibold))
+                        Text(localized(showsAll ? "从上面的输入框添加第一个任务。" : "添加任务，或把任务安排到今天。",
+                                       showsAll ? "Add your first task using the field above." : "Add a task, or schedule one for today.",
+                                       language: appLanguage))
+                            .font(.system(size: 11))
+                            .foregroundStyle(Color.ink.opacity(0.46))
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.vertical, 15)
+                } else {
+                    ForEach(visibleTasks) { task in
+                        TaskRow(task: task, selected: task.id == store.selectedTaskID, store: store)
+                        if task.id != visibleTasks.last?.id { Divider().padding(.leading, 38) }
+                    }
                 }
             }
         }
         .padding(22)
         .liquidGlass(cornerRadius: 20, tint: Color.white.opacity(0.10))
+    }
+
+    private func taskDueTitle(_ choice: TaskDueChoice) -> String {
+        switch choice {
+        case .today: localized("今天", "Today", language: appLanguage)
+        case .tomorrow: localized("明天", "Tomorrow", language: appLanguage)
+        case .unscheduled: localized("未安排", "Unscheduled", language: appLanguage)
+        }
+    }
+
+    private func taskDueIcon(_ choice: TaskDueChoice) -> String {
+        switch choice {
+        case .today: "sun.max"
+        case .tomorrow: "sunrise"
+        case .unscheduled: "calendar.badge.plus"
+        }
     }
 }
 
@@ -826,17 +1100,48 @@ struct TaskRow: View {
                     .foregroundStyle(task.isDone ? Color.green : Color.ink.opacity(0.28))
             }
             .buttonStyle(.plain)
-            Text(task.title)
-                .font(.system(size: 13, weight: selected ? .semibold : .regular))
-                .strikethrough(task.isDone)
-                .foregroundStyle(task.isDone ? Color.ink.opacity(0.38) : Color.ink)
-                .lineLimit(1)
-            Spacer()
+            .disabled(store.phase != .idle)
+            .accessibilityLabel(localized(task.isDone ? "标记为未完成" : "标记为完成",
+                                          task.isDone ? "Mark incomplete" : "Mark complete",
+                                          language: nil))
+            Button { store.selectTask(task.id) } label: {
+                Text(task.title)
+                    .font(.system(size: 13, weight: selected ? .semibold : .regular))
+                    .strikethrough(task.isDone)
+                    .foregroundStyle(task.isDone ? Color.ink.opacity(0.38) : Color.ink)
+                    .lineLimit(1)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .buttonStyle(.plain)
+            .disabled(store.phase != .idle)
+            .accessibilityValue(selected ? localized("当前任务", "Current task", language: nil) : "")
             if task.pomodoros > 0 {
                 Label("\(task.pomodoros)", systemImage: "timer")
                     .font(.system(size: 11, weight: .medium))
                     .foregroundStyle(Color.tomato.opacity(0.75))
             }
+            Menu {
+                ForEach(TaskDueChoice.allCases, id: \.self) { choice in
+                    Button {
+                        store.setTaskDueChoice(choice, for: task)
+                    } label: {
+                        if store.taskDueChoice(for: task) == choice {
+                            Label(taskDueTitle(choice), systemImage: "checkmark")
+                        } else {
+                            Text(taskDueTitle(choice))
+                        }
+                    }
+                }
+            } label: {
+                Image(systemName: taskDueIcon(store.taskDueChoice(for: task)))
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(Color.ink.opacity(0.42))
+            }
+            .menuStyle(.borderlessButton)
+            .accessibilityLabel(localized("安排日期：\(taskDueTitle(store.taskDueChoice(for: task)))",
+                                          "Schedule: \(taskDueTitle(store.taskDueChoice(for: task)))",
+                                          language: nil))
+            .disabled(store.isTaskLockedToCurrentSession(task.id))
             if selected {
                 Text("当前")
                     .font(.system(size: 10, weight: .bold))
@@ -851,11 +1156,30 @@ struct TaskRow: View {
                     .foregroundStyle(Color.ink.opacity(0.28))
             }
             .buttonStyle(.plain)
-            .help("删除任务")
+            .help(store.isTaskLockedToCurrentSession(task.id)
+                  ? localized("当前专注使用此任务，结束后才能删除", "This task is locked to the current session", language: nil)
+                  : localized("删除任务", "Delete task", language: nil))
+            .disabled(store.isTaskLockedToCurrentSession(task.id))
+            .accessibilityLabel(localized("删除任务 \(task.title)", "Delete task \(task.title)", language: nil))
         }
         .contentShape(Rectangle())
-        .onTapGesture { store.selectTask(task.id) }
         .padding(.vertical, 11)
+    }
+
+    private func taskDueTitle(_ choice: TaskDueChoice) -> String {
+        switch choice {
+        case .today: localized("今天", "Today", language: nil)
+        case .tomorrow: localized("明天", "Tomorrow", language: nil)
+        case .unscheduled: localized("未安排", "Unscheduled", language: nil)
+        }
+    }
+
+    private func taskDueIcon(_ choice: TaskDueChoice) -> String {
+        switch choice {
+        case .today: "sun.max"
+        case .tomorrow: "sunrise"
+        case .unscheduled: "calendar.badge.plus"
+        }
     }
 }
 
@@ -867,7 +1191,6 @@ struct PrimaryButtonStyle: ButtonStyle {
             .padding(.horizontal, 24)
             .frame(height: 37)
             .liquidGlass(cornerRadius: 999, tint: Color.tomato.opacity(configuration.isPressed ? 0.55 : 0.82), interactive: true)
-            .scaleEffect(configuration.isPressed ? 0.97 : 1)
     }
 }
 
@@ -881,17 +1204,21 @@ struct SecondaryButtonStyle: ButtonStyle {
     }
 }
 
-extension View {
-    func sectionLabel() -> some View {
-        self.font(.system(size: 10, weight: .bold)).tracking(1.1).foregroundStyle(Color.ink.opacity(0.42))
-    }
+private struct LiquidGlassModifier: ViewModifier {
+    let cornerRadius: CGFloat
+    let tint: Color?
+    let interactive: Bool
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     @ViewBuilder
-    func liquidGlass(cornerRadius: CGFloat = 20, tint: Color? = nil, interactive: Bool = false) -> some View {
+    func body(content: Content) -> some View {
         if #available(macOS 26.0, *) {
-            self.glassEffect(.regular.tint(tint).interactive(interactive), in: RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
+            content.glassEffect(
+                .regular.tint(tint).interactive(interactive && !reduceMotion),
+                in: RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+            )
         } else {
-            self
+            content
                 .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
                 .background((tint ?? Color.white.opacity(0.12)), in: RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
                 .overlay(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous).stroke(Color.white.opacity(0.38), lineWidth: 1))
@@ -900,14 +1227,24 @@ extension View {
     }
 }
 
+extension View {
+    func sectionLabel() -> some View {
+        self.font(.system(size: 10, weight: .bold)).tracking(1.1).foregroundStyle(Color.ink.opacity(0.42))
+    }
+
+    func liquidGlass(cornerRadius: CGFloat = 20, tint: Color? = nil, interactive: Bool = false) -> some View {
+        modifier(LiquidGlassModifier(cornerRadius: cornerRadius, tint: tint, interactive: interactive))
+    }
+}
+
 struct LiquidBackdrop: View {
     var body: some View {
         ZStack {
             LinearGradient(
                 colors: [
-                    Color(red: 0.91, green: 0.97, blue: 0.94),
-                    Color(red: 1.00, green: 0.93, blue: 0.88),
-                    Color(red: 0.92, green: 0.92, blue: 1.00)
+                    Color.appBackground,
+                    Color.peach.opacity(0.28),
+                    Color.lavender.opacity(0.20)
                 ],
                 startPoint: .topLeading,
                 endPoint: .bottomTrailing
@@ -933,11 +1270,38 @@ struct LiquidBackdrop: View {
 }
 
 extension Color {
-    static let ink = Color(red: 0.08, green: 0.16, blue: 0.17)
-    static let tomato = Color(red: 0.94, green: 0.35, blue: 0.25)
-    static let mint = Color(red: 0.69, green: 0.88, blue: 0.78)
-    static let lavender = Color(red: 0.76, green: 0.74, blue: 0.96)
-    static let peach = Color(red: 1.0, green: 0.84, blue: 0.73)
-    static let appBackground = Color(red: 0.95, green: 0.97, blue: 0.94)
-    static let sidebarBackground = Color(red: 0.89, green: 0.95, blue: 0.90)
+    private static func adaptive(light: NSColor, dark: NSColor) -> Color {
+        Color(nsColor: NSColor(name: nil) { appearance in
+            appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua ? dark : light
+        })
+    }
+
+    static let ink = adaptive(
+        light: NSColor(calibratedRed: 0.08, green: 0.16, blue: 0.17, alpha: 1),
+        dark: NSColor(calibratedWhite: 0.94, alpha: 1)
+    )
+    static let tomato = adaptive(
+        light: NSColor(calibratedRed: 0.94, green: 0.35, blue: 0.25, alpha: 1),
+        dark: NSColor(calibratedRed: 1.00, green: 0.42, blue: 0.32, alpha: 1)
+    )
+    static let mint = adaptive(
+        light: NSColor(calibratedRed: 0.69, green: 0.88, blue: 0.78, alpha: 1),
+        dark: NSColor(calibratedRed: 0.28, green: 0.58, blue: 0.44, alpha: 1)
+    )
+    static let lavender = adaptive(
+        light: NSColor(calibratedRed: 0.76, green: 0.74, blue: 0.96, alpha: 1),
+        dark: NSColor(calibratedRed: 0.42, green: 0.40, blue: 0.68, alpha: 1)
+    )
+    static let peach = adaptive(
+        light: NSColor(calibratedRed: 1.00, green: 0.84, blue: 0.73, alpha: 1),
+        dark: NSColor(calibratedRed: 0.66, green: 0.42, blue: 0.30, alpha: 1)
+    )
+    static let appBackground = adaptive(
+        light: NSColor(calibratedRed: 0.95, green: 0.97, blue: 0.94, alpha: 1),
+        dark: NSColor(calibratedRed: 0.11, green: 0.12, blue: 0.14, alpha: 1)
+    )
+    static let sidebarBackground = adaptive(
+        light: NSColor(calibratedRed: 0.89, green: 0.95, blue: 0.90, alpha: 1),
+        dark: NSColor(calibratedRed: 0.15, green: 0.19, blue: 0.17, alpha: 1)
+    )
 }

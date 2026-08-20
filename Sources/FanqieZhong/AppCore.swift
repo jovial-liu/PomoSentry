@@ -23,7 +23,7 @@ struct PomoSentryApp: App {
         .defaultSize(width: 1080, height: 720)
 
         MenuBarExtra {
-            Button(store.isRunning ? localized("暂停计时", "Pause", language: appLanguage) : localized("开始专注", "Start Focus", language: appLanguage)) {
+            Button(store.primaryActionTitle(language: appLanguage)) {
                 store.toggleTimer()
             }
             .disabled(store.isBusyOrLocked)
@@ -59,11 +59,11 @@ struct WindowConfigurator: NSViewRepresentable {
         window.titleVisibility = .hidden
         window.titlebarSeparatorStyle = .none
         window.isOpaque = true
-        window.backgroundColor = NSColor(calibratedRed: 0.91, green: 0.97, blue: 0.94, alpha: 1)
+        window.backgroundColor = NSColor.windowBackgroundColor
         window.styleMask.insert(.fullSizeContentView)
         window.isMovableByWindowBackground = true
         window.contentView?.wantsLayer = true
-        window.contentView?.layer?.backgroundColor = NSColor(calibratedRed: 0.91, green: 0.97, blue: 0.94, alpha: 1).cgColor
+        window.contentView?.layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
         window.contentView?.layer?.cornerRadius = 18
         window.contentView?.layer?.cornerCurve = .continuous
         window.contentView?.layer?.masksToBounds = true
@@ -75,7 +75,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     weak var store: TimerStore?
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
-        guard let store else { return .terminateNow }
+        guard let store else {
+            NSApp.activate(ignoringOtherApps: true)
+            return .terminateCancel
+        }
         if store.isStrictlyLocked {
             NSApp.activate(ignoringOtherApps: true)
             NSApp.windows.first?.makeKeyAndOrderFront(nil)
@@ -143,6 +146,22 @@ struct PomodoroTask: Identifiable, Codable, Equatable, Sendable {
     }
 }
 
+enum TaskDueChoice: String, CaseIterable, Codable, Sendable {
+    case today
+    case tomorrow
+    case unscheduled
+}
+
+enum TaskVisibility {
+    static func belongsInToday(_ task: PomodoroTask, now: Date = Date(), calendar: Calendar = .current) -> Bool {
+        guard let date = task.dueDate else { return true }
+        let startOfToday = calendar.startOfDay(for: now)
+        let startOfTomorrow = calendar.date(byAdding: .day, value: 1, to: startOfToday) ?? Date.distantFuture
+        if date < startOfToday { return !task.isDone }
+        return date < startOfTomorrow
+    }
+}
+
 struct AllowedApplication: Identifiable, Codable, Equatable, Sendable {
     var id: String { path }
     let bundleID: String
@@ -174,6 +193,73 @@ enum AppListPolicy: String, CaseIterable, Codable, Sendable {
 enum BlockingBehavior: String, CaseIterable, Codable, Sendable {
     case keepRunning
     case forceQuit
+}
+
+struct StrictAppConfiguration: Codable, Equatable, Sendable {
+    let policy: AppListPolicy
+    let blockingBehavior: BlockingBehavior
+    let applications: [AllowedApplication]
+}
+
+enum StrictInputDecision {
+    static func shouldBlock(
+        active: Bool,
+        policy: AppListPolicy,
+        listedPIDs: Set<pid_t>,
+        navigationPIDs: Set<pid_t>,
+        ownPID: pid_t,
+        targetPID: pid_t?,
+        authorizationPIDs: Set<pid_t> = []
+    ) -> Bool {
+        guard active else { return false }
+        guard let targetPID else { return true }
+        if targetPID == ownPID || navigationPIDs.contains(targetPID) || authorizationPIDs.contains(targetPID) { return false }
+        return policy.shouldBlock(isListed: listedPIDs.contains(targetPID))
+    }
+}
+
+enum SystemNavigationSurface {
+    static let bundleIdentifiers: Set<String> = [
+        "com.apple.dock",
+        "com.apple.systemuiserver",
+        "com.apple.controlcenter",
+        "com.apple.WindowManager",
+        "com.apple.Spotlight"
+    ]
+
+    static func contains(bundleIdentifier: String?) -> Bool {
+        bundleIdentifier.map(bundleIdentifiers.contains) ?? false
+    }
+}
+
+enum SystemAuthorizationSurface {
+    static let bundleIdentifiers: Set<String> = [
+        "com.apple.SecurityAgent"
+    ]
+    static let processNames: Set<String> = [
+        "SecurityAgent",
+        "SecurityAgentUI"
+    ]
+
+    static func contains(bundleIdentifier: String?) -> Bool {
+        bundleIdentifier.map(bundleIdentifiers.contains) ?? false
+    }
+
+    static func contains(processName: String?) -> Bool {
+        processName.map(processNames.contains) ?? false
+    }
+
+    static func visibleWindowPIDs() -> Set<pid_t> {
+        guard let windows = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] else {
+            return []
+        }
+        return Set(windows.compactMap { window -> pid_t? in
+            guard let ownerName = window[kCGWindowOwnerName as String] as? String,
+                  contains(processName: ownerName),
+                  let ownerPID = window[kCGWindowOwnerPID as String] as? NSNumber else { return nil }
+            return pid_t(ownerPID.int32Value)
+        })
+    }
 }
 
 private final class FocusShieldPanel: NSPanel {
@@ -220,22 +306,28 @@ private final class StrictInputGate: @unchecked Sendable {
     private var active = false
     private var policy = AppListPolicy.allowlist
     private var listedPIDs: Set<pid_t> = []
+    private var navigationPIDs: Set<pid_t> = []
+    private var authorizationPIDs: Set<pid_t> = []
     private var frontmostPID: pid_t?
     private let ownPID = ProcessInfo.processInfo.processIdentifier
 
-    func configure(policy: AppListPolicy, listedPIDs: Set<pid_t>, frontmostPID: pid_t?) {
+    func configure(policy: AppListPolicy, listedPIDs: Set<pid_t>, navigationPIDs: Set<pid_t>, authorizationPIDs: Set<pid_t> = [], frontmostPID: pid_t?) {
         lock.lock()
         self.policy = policy
         self.listedPIDs = listedPIDs
+        self.navigationPIDs = navigationPIDs
+        self.authorizationPIDs = authorizationPIDs
         self.frontmostPID = frontmostPID
         active = true
         lock.unlock()
     }
 
-    func update(policy: AppListPolicy, listedPIDs: Set<pid_t>, frontmostPID: pid_t?) {
+    func update(policy: AppListPolicy, listedPIDs: Set<pid_t>, navigationPIDs: Set<pid_t>, authorizationPIDs: Set<pid_t> = [], frontmostPID: pid_t?) {
         lock.lock()
         self.policy = policy
         self.listedPIDs = listedPIDs
+        self.navigationPIDs = navigationPIDs
+        self.authorizationPIDs = authorizationPIDs
         self.frontmostPID = frontmostPID
         lock.unlock()
     }
@@ -250,6 +342,8 @@ private final class StrictInputGate: @unchecked Sendable {
         lock.lock()
         active = false
         listedPIDs.removeAll()
+        navigationPIDs.removeAll()
+        authorizationPIDs.removeAll()
         frontmostPID = nil
         lock.unlock()
     }
@@ -257,29 +351,48 @@ private final class StrictInputGate: @unchecked Sendable {
     func shouldBlock(processIdentifier: pid_t?) -> Bool {
         lock.lock()
         defer { lock.unlock() }
-        guard active else { return false }
-        guard let processIdentifier else { return true }
-        if processIdentifier == ownPID { return false }
-        return policy.shouldBlock(isListed: listedPIDs.contains(processIdentifier))
+        return StrictInputDecision.shouldBlock(
+            active: active,
+            policy: policy,
+            listedPIDs: listedPIDs,
+            navigationPIDs: navigationPIDs,
+            ownPID: ownPID,
+            targetPID: processIdentifier,
+            authorizationPIDs: authorizationPIDs
+        )
     }
 
     func shouldBlockFrontmostApplication() -> Bool {
         lock.lock()
         defer { lock.unlock() }
-        guard active else { return false }
-        guard let frontmostPID else { return true }
-        if frontmostPID == ownPID { return false }
-        return policy.shouldBlock(isListed: listedPIDs.contains(frontmostPID))
+        return StrictInputDecision.shouldBlock(
+            active: active,
+            policy: policy,
+            listedPIDs: listedPIDs,
+            navigationPIDs: navigationPIDs,
+            ownPID: ownPID,
+            targetPID: frontmostPID,
+            authorizationPIDs: authorizationPIDs
+        )
+    }
+
+    func currentFrontmostPID() -> pid_t? {
+        lock.lock()
+        defer { lock.unlock() }
+        return frontmostPID
     }
 }
 
 private final class StrictInputTap {
     private let gate: StrictInputGate
+    private let onDisabled: () -> Void
     private var eventTap: CFMachPort?
     private var runLoopSource: CFRunLoopSource?
+    private var lastMouseTargetPID: pid_t?
 
-    init(gate: StrictInputGate) {
+    init(gate: StrictInputGate, onDisabled: @escaping () -> Void) {
         self.gate = gate
+        self.onDisabled = onDisabled
     }
 
     func start() -> Bool {
@@ -303,6 +416,7 @@ private final class StrictInputTap {
                 let controller = Unmanaged<StrictInputTap>.fromOpaque(userInfo).takeUnretainedValue()
                 if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
                     if let tap = controller.eventTap { CGEvent.tapEnable(tap: tap, enable: true) }
+                    controller.onDisabled()
                     return Unmanaged.passUnretained(event)
                 }
                 return controller.shouldSuppress(type: type, event: event) ? nil : Unmanaged.passUnretained(event)
@@ -324,19 +438,35 @@ private final class StrictInputTap {
         if let eventTap { CFMachPortInvalidate(eventTap) }
         runLoopSource = nil
         eventTap = nil
+        lastMouseTargetPID = nil
     }
 
     private func shouldSuppress(type: CGEventType, event: CGEvent) -> Bool {
         switch type {
         case .leftMouseDown, .leftMouseUp, .rightMouseDown, .rightMouseUp,
-             .otherMouseDown, .otherMouseUp, .leftMouseDragged, .rightMouseDragged,
-             .otherMouseDragged, .scrollWheel:
-            return gate.shouldBlock(processIdentifier: Self.windowOwner(at: event.location))
+             .otherMouseDown, .otherMouseUp:
+            let targetPID = Self.targetPID(for: event, resolveWindowOwner: true)
+                ?? lastMouseTargetPID
+                ?? gate.currentFrontmostPID()
+            if let targetPID { lastMouseTargetPID = targetPID }
+            return gate.shouldBlock(processIdentifier: targetPID)
+        case .leftMouseDragged, .rightMouseDragged, .otherMouseDragged, .scrollWheel:
+            let targetPID = Self.targetPID(for: event, resolveWindowOwner: false)
+                ?? gate.currentFrontmostPID()
+                ?? lastMouseTargetPID
+            if let targetPID { lastMouseTargetPID = targetPID }
+            return gate.shouldBlock(processIdentifier: targetPID)
         case .keyDown, .keyUp, .flagsChanged:
             return gate.shouldBlockFrontmostApplication()
         default:
             return false
         }
+    }
+
+    private static func targetPID(for event: CGEvent, resolveWindowOwner: Bool) -> pid_t? {
+        let eventTargetPID = event.getIntegerValueField(.eventTargetUnixProcessID)
+        if eventTargetPID > 0 { return pid_t(eventTargetPID) }
+        return resolveWindowOwner ? windowOwner(at: event.location) : nil
     }
 
     private static func windowOwner(at point: CGPoint) -> pid_t? {
@@ -478,8 +608,24 @@ enum WebsiteRulesFile {
         return begins.count == 1 && ends.count == 1 && begins[0] < ends[0]
     }
 
+    static func hasExactRules(in hosts: String, domains: [String]) -> Bool {
+        guard !domains.isEmpty,
+              let expected = try? replacement(existing: "", domains: domains),
+              let actualBlock = managedBlock(in: hosts),
+              let expectedBlock = managedBlock(in: expected) else { return false }
+        return actualBlock == expectedBlock
+    }
+
     static func containsAnyMarker(in hosts: String) -> Bool {
         hosts.components(separatedBy: .newlines).contains { $0 == beginMarker || $0 == endMarker }
+    }
+
+    private static func managedBlock(in hosts: String) -> [String]? {
+        let lines = hosts.components(separatedBy: .newlines)
+        let begins = lines.indices.filter { lines[$0] == beginMarker }
+        let ends = lines.indices.filter { lines[$0] == endMarker }
+        guard begins.count == 1, ends.count == 1, begins[0] < ends[0] else { return nil }
+        return Array(lines[begins[0]...ends[0]])
     }
 }
 
@@ -551,6 +697,11 @@ final class FocusGuard: ObservableObject {
     @Published private(set) var lastBlockedApp = ""
     @Published private(set) var blockedCount = 0
     @Published private(set) var inputPermissionRequired = false
+    @Published private(set) var accessibilityGranted = false
+    @Published private(set) var configurationLocked = false
+    @Published private(set) var applicationStatus = ""
+    @Published private(set) var lastProtectionError = ""
+    @Published private(set) var inputProtectionWarning = ""
 
     private let workspace = NSWorkspace.shared
     private let defaults = UserDefaults.standard
@@ -561,25 +712,46 @@ final class FocusGuard: ObservableObject {
     private var lastAllowedPID: pid_t?
     private var activeBlockedPID: pid_t?
     private var hiddenByGuardPIDs: Set<pid_t> = []
-    private var websiteOperationInProgress = false
+    private var activeListedPIDs: Set<pid_t> = []
+    private var identityCache: [pid_t: Bool] = [:]
+    @Published private var websiteOperationInProgress = false
+    private var activeConfiguration: StrictAppConfiguration?
+    private var administratorAuthorizationAllowed = false
+    private var activeAuthorizationPIDs: Set<pid_t> = []
     private let shieldController = FocusShieldController()
     private let inputGate = StrictInputGate()
-    private lazy var inputTap = StrictInputTap(gate: inputGate)
+    private lazy var inputTap = StrictInputTap(gate: inputGate) { [weak self] in
+        Task { @MainActor in self?.handleInputTapDisabled() }
+    }
 
     init() {
         loadConfiguration()
+        accessibilityGranted = Self.accessibilityPermission()
+        inputPermissionRequired = isEnabled && !accessibilityGranted
+        if inputPermissionRequired { beginPermissionPolling() }
         reconcileWebsiteState()
     }
 
     var displayedApps: [AllowedApplication] { listPolicy == .allowlist ? allowedApps : blockedApps }
+    var currentConfiguration: StrictAppConfiguration {
+        StrictAppConfiguration(
+            policy: listPolicy,
+            blockingBehavior: blockingBehavior,
+            applications: listPolicy == .allowlist ? allowedApps : blockedApps
+        )
+    }
     var isWebsiteOperationInProgress: Bool { websiteOperationInProgress }
     var requiresWebsiteCleanup: Bool { websiteOperationInProgress || websiteRulesActive || Self.hostsFileContainsAnyMarker() }
+    func websiteRulesMatch(domains: [String]) -> Bool {
+        guard let hosts = try? String(contentsOfFile: "/etc/hosts", encoding: .utf8) else { return false }
+        return WebsiteRulesFile.hasExactRules(in: hosts, domains: domains)
+    }
     var statusText: String {
-        if inputPermissionRequired {
+        if isEnabled && (!accessibilityGranted || inputPermissionRequired) {
             return localized("需要辅助功能权限，严格专注尚未启动", "Accessibility permission is required; strict focus did not start")
         }
         if isMonitoring {
-            return listPolicy == .allowlist
+            return (activeConfiguration?.policy ?? listPolicy) == .allowlist
                 ? localized("严格模式运行中 · 只允许已验证的白名单 App", "Strict mode active · Verified allowlist only")
                 : localized("严格模式运行中 · 正在拦截黑名单 App", "Strict mode active · Blocklist enforced")
         }
@@ -589,10 +761,13 @@ final class FocusGuard: ObservableObject {
     }
 
     func setEnabled(_ enabled: Bool) {
-        guard !isMonitoring else { return }
+        guard !configurationLocked, !isMonitoring else { return }
         isEnabled = enabled
         defaults.set(enabled, forKey: "strictModeEnabled")
-        if !enabled {
+        if enabled {
+            refreshAccessibilityPermission()
+            if !accessibilityGranted { beginPermissionPolling() }
+        } else {
             stopMonitoring()
             permissionPollingTask?.cancel()
             permissionPollingTask = nil
@@ -601,25 +776,31 @@ final class FocusGuard: ObservableObject {
     }
 
     @discardableResult
-    func startMonitoring() -> Bool {
-        guard !isMonitoring else { return true }
-        guard Self.accessibilityPermission() else {
-            inputPermissionRequired = true
-            lastBlockedApp = localized("请允许 PomoSentry 使用辅助功能后重新开始", "Allow PomoSentry in Accessibility, then start again")
-            beginPermissionPolling()
-            return false
+    func startMonitoring(configuration: StrictAppConfiguration? = nil, allowAdministratorAuthorization: Bool = false) -> Bool {
+        if isMonitoring {
+            administratorAuthorizationAllowed = allowAdministratorAuthorization
+            refreshInputGate(frontmostApplication: workspace.frontmostApplication)
+            return true
         }
+        guard validateAccessibilityPermission() else { return false }
+        administratorAuthorizationAllowed = allowAdministratorAuthorization
+        activeConfiguration = configuration ?? currentConfiguration
         permissionPollingTask?.cancel()
         permissionPollingTask = nil
         inputPermissionRequired = false
         blockedCount = 0
         activeBlockedPID = nil
+        inputProtectionWarning = ""
+        activeListedPIDs.removeAll()
+        identityCache.removeAll()
         lastAllowedPID = ProcessInfo.processInfo.processIdentifier
         refreshInputGate(frontmostApplication: workspace.frontmostApplication, configure: true)
         guard inputTap.start() else {
             inputGate.stop()
+            activeConfiguration = nil
             inputPermissionRequired = true
             lastBlockedApp = localized("无法建立全局输入拦截，请检查辅助功能权限", "Could not create the global input blocker; check Accessibility permission")
+            lastProtectionError = lastBlockedApp
             return false
         }
         isMonitoring = true
@@ -628,6 +809,9 @@ final class FocusGuard: ObservableObject {
             observers.append(center.addObserver(forName: name, object: nil, queue: .main) { [weak self] note in
                 let application = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication
                 Task { @MainActor in
+                    if name == NSWorkspace.didLaunchApplicationNotification, let application {
+                        self?.identityCache.removeValue(forKey: application.processIdentifier)
+                    }
                     self?.refreshInputGate(frontmostApplication: application)
                     self?.enforce(application)
                 }
@@ -642,11 +826,28 @@ final class FocusGuard: ObservableObject {
             while !Task.isCancelled {
                 try? await Task.sleep(for: .milliseconds(60))
                 guard !Task.isCancelled else { break }
+                if self?.administratorAuthorizationAllowed == true {
+                    self?.refreshInputGate(frontmostApplication: self?.workspace.frontmostApplication)
+                }
                 self?.enforceCurrentApplication()
             }
         }
+        terminateDisallowedApplications()
         hideDisallowedApplications()
         enforceCurrentApplication()
+        return true
+    }
+
+    @discardableResult
+    func validateAccessibilityPermission() -> Bool {
+        refreshAccessibilityPermission()
+        guard accessibilityGranted else {
+            inputPermissionRequired = true
+            lastBlockedApp = localized("请允许 PomoSentry 使用辅助功能后重新开始", "Allow PomoSentry in Accessibility, then start again")
+            lastProtectionError = lastBlockedApp
+            beginPermissionPolling()
+            return false
+        }
         return true
     }
 
@@ -657,32 +858,61 @@ final class FocusGuard: ObservableObject {
         reconciliationTask = nil
         inputTap.stop()
         inputGate.stop()
+        activeConfiguration = nil
+        administratorAuthorizationAllowed = false
+        activeAuthorizationPIDs.removeAll()
+        activeListedPIDs.removeAll()
+        identityCache.removeAll()
         shieldController.dismiss()
         activeBlockedPID = nil
         isMonitoring = false
         lastBlockedApp = ""
+        inputProtectionWarning = ""
         restoreApplicationsHiddenByGuard()
     }
 
-    func addApplication() {
-        guard !isMonitoring else { return }
+    func setAdministratorAuthorizationAllowed(_ allowed: Bool) {
+        administratorAuthorizationAllowed = allowed
+        guard isMonitoring else { return }
+        refreshInputGate(frontmostApplication: workspace.frontmostApplication)
+    }
+
+    @discardableResult
+    func addApplication() -> Bool {
+        guard !configurationLocked, !isMonitoring else { return false }
         let panel = NSOpenPanel()
         panel.allowedContentTypes = [.application]
         panel.allowsMultipleSelection = false
         panel.canChooseDirectories = false
-        guard panel.runModal() == .OK, let url = panel.url, let application = ApplicationIdentity.enrolledApplication(at: url) else { return }
+        guard panel.runModal() == .OK else { return false }
+        guard let url = panel.url, let application = ApplicationIdentity.enrolledApplication(at: url) else {
+            applicationStatus = localized("无法验证这个 App 的签名或应用包", "This app could not be verified")
+            return false
+        }
         if listPolicy == .allowlist {
-            guard !allowedApps.contains(where: { $0.path == application.path }) else { return }
+            guard !allowedApps.contains(where: { $0.path == application.path }) else {
+                applicationStatus = localized("这个 App 已经在白名单中", "This app is already on the allowlist")
+                return false
+            }
             allowedApps.append(application)
         } else {
-            guard application.bundleID != mainBundleID, !blockedApps.contains(where: { $0.path == application.path }) else { return }
+            guard application.bundleID != mainBundleID else {
+                applicationStatus = localized("PomoSentry 不能加入自己的黑名单", "PomoSentry cannot be added to its own blocklist")
+                return false
+            }
+            guard !blockedApps.contains(where: { $0.path == application.path }) else {
+                applicationStatus = localized("这个 App 已经在黑名单中", "This app is already on the blocklist")
+                return false
+            }
             blockedApps.append(application)
         }
         saveApplications()
+        applicationStatus = localized("已添加：\(application.name)", "Added: \(application.name)")
+        return true
     }
 
     func removeApplication(_ app: AllowedApplication) {
-        guard !isMonitoring else { return }
+        guard !configurationLocked, !isMonitoring else { return }
         if listPolicy == .allowlist {
             guard app.bundleID != mainBundleID else { return }
             allowedApps.removeAll { $0.path == app.path }
@@ -690,27 +920,35 @@ final class FocusGuard: ObservableObject {
             blockedApps.removeAll { $0.path == app.path }
         }
         saveApplications()
+        applicationStatus = localized("已移除：\(app.name)", "Removed: \(app.name)")
     }
 
     func setListPolicy(_ policy: AppListPolicy) {
-        guard !isMonitoring else { return }
+        guard !configurationLocked, !isMonitoring else { return }
         listPolicy = policy
         defaults.set(policy.rawValue, forKey: "appListPolicy")
     }
 
     func setBlockingBehavior(_ behavior: BlockingBehavior) {
-        guard !isMonitoring else { return }
+        guard !configurationLocked, !isMonitoring else { return }
         blockingBehavior = behavior
         defaults.set(behavior.rawValue, forKey: "blockingBehavior")
     }
 
     func setWebsiteBlockingEnabled(_ enabled: Bool) {
+        guard !configurationLocked else { return }
         websiteBlockingEnabled = enabled
         defaults.set(enabled, forKey: "websiteBlockingEnabled")
+        if !enabled, requiresWebsiteCleanup {
+            Task { [weak self] in
+                _ = await self?.clearWebsiteRules()
+            }
+        }
     }
 
     @discardableResult
     func addWebsite(_ input: String) -> Bool {
+        guard !configurationLocked else { return false }
         guard let domain = WebsiteRulesFile.normalizedDomain(input), !blockedWebsites.contains(domain) else { return false }
         blockedWebsites.append(domain)
         blockedWebsites.sort()
@@ -720,14 +958,16 @@ final class FocusGuard: ObservableObject {
     }
 
     func removeWebsite(_ domain: String) {
+        guard !configurationLocked else { return }
         blockedWebsites.removeAll { $0 == domain }
         defaults.set(blockedWebsites, forKey: "blockedWebsites")
     }
 
     @discardableResult
-    func applyWebsiteRules() async -> Bool {
-        guard websiteBlockingEnabled, !blockedWebsites.isEmpty else { return true }
-        return await updateWebsiteRules(domains: blockedWebsites, applying: true)
+    func applyWebsiteRules(domains: [String]? = nil) async -> Bool {
+        let requestedDomains = domains ?? blockedWebsites
+        guard !requestedDomains.isEmpty else { return false }
+        return await updateWebsiteRules(domains: requestedDomains, applying: true)
     }
 
     @discardableResult
@@ -741,11 +981,20 @@ final class FocusGuard: ObservableObject {
         guard let hosts = try? String(contentsOfFile: "/etc/hosts", encoding: .utf8) else {
             websiteRulesActive = false
             websiteStatus = WebsiteRulesError.unreadable.localizedDescription
+            lastProtectionError = websiteStatus
             return
         }
         websiteRulesActive = WebsiteRulesFile.hasValidRules(in: hosts)
-        if WebsiteRulesFile.containsAnyMarker(in: hosts), !websiteRulesActive {
+        if websiteRulesActive,
+           websiteBlockingEnabled,
+           !blockedWebsites.isEmpty,
+           !WebsiteRulesFile.hasExactRules(in: hosts, domains: blockedWebsites) {
+            websiteStatus = localized("系统网站规则与当前名单不一致，请重新开始专注或清除规则",
+                                     "The system website rules do not match the current list. Start focus again or remove the rules.")
+            lastProtectionError = websiteStatus
+        } else if WebsiteRulesFile.containsAnyMarker(in: hosts), !websiteRulesActive {
             websiteStatus = WebsiteRulesError.malformedMarkers.localizedDescription
+            lastProtectionError = websiteStatus
         }
     }
 
@@ -753,6 +1002,21 @@ final class FocusGuard: ObservableObject {
         guard let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility") else { return }
         beginPermissionPolling()
         workspace.open(url)
+    }
+
+    func setConfigurationLocked(_ locked: Bool) {
+        configurationLocked = locked
+    }
+
+    func refreshAccessibilityPermission() {
+        accessibilityGranted = Self.accessibilityPermission()
+        if accessibilityGranted {
+            inputPermissionRequired = false
+            let permissionError = localized("请允许 PomoSentry 使用辅助功能后重新开始", "Allow PomoSentry in Accessibility, then start again")
+            if lastProtectionError == permissionError { lastProtectionError = "" }
+        } else if isEnabled {
+            inputPermissionRequired = true
+        }
     }
 
     func revealCurrentApplication() {
@@ -796,17 +1060,43 @@ final class FocusGuard: ObservableObject {
         enforce(application)
     }
 
+    private func handleInputTapDisabled() {
+        guard isMonitoring else { return }
+        inputProtectionWarning = localized("系统暂时暂停了全局输入拦截，PomoSentry 已立即尝试恢复。",
+                                           "The system briefly paused global input blocking; PomoSentry immediately attempted to restore it.")
+        lastProtectionError = inputProtectionWarning
+        if !Self.accessibilityPermission() {
+            inputPermissionRequired = true
+            beginPermissionPolling()
+        }
+    }
+
     private func refreshInputGate(frontmostApplication: NSRunningApplication?, configure: Bool = false) {
-        let list = listPolicy == .allowlist ? allowedApps : blockedApps
+        guard let configuration = activeConfiguration else { return }
+        let list = configuration.applications
         let listedPIDs = Set(workspace.runningApplications.compactMap { application -> pid_t? in
             guard !application.isTerminated,
-                  list.contains(where: { ApplicationIdentity.matches(application, enrolled: $0) }) else { return nil }
+                  isListed(application, in: list) else { return nil }
             return application.processIdentifier
         })
+        activeListedPIDs = listedPIDs
+        let navigationPIDs = Set(workspace.runningApplications.compactMap { application -> pid_t? in
+            guard let bundleIdentifier = application.bundleIdentifier,
+                  SystemNavigationSurface.bundleIdentifiers.contains(bundleIdentifier) else { return nil }
+            return application.processIdentifier
+        })
+        let authorizationPIDs = administratorAuthorizationAllowed
+            ? Set(workspace.runningApplications.compactMap { application -> pid_t? in
+                guard let bundleIdentifier = application.bundleIdentifier,
+                      SystemAuthorizationSurface.contains(bundleIdentifier: bundleIdentifier) else { return nil }
+                return application.processIdentifier
+            }).union(SystemAuthorizationSurface.visibleWindowPIDs())
+            : []
+        activeAuthorizationPIDs = authorizationPIDs
         if configure {
-            inputGate.configure(policy: listPolicy, listedPIDs: listedPIDs, frontmostPID: frontmostApplication?.processIdentifier)
+            inputGate.configure(policy: configuration.policy, listedPIDs: listedPIDs, navigationPIDs: navigationPIDs, authorizationPIDs: authorizationPIDs, frontmostPID: frontmostApplication?.processIdentifier)
         } else {
-            inputGate.update(policy: listPolicy, listedPIDs: listedPIDs, frontmostPID: frontmostApplication?.processIdentifier)
+            inputGate.update(policy: configuration.policy, listedPIDs: listedPIDs, navigationPIDs: navigationPIDs, authorizationPIDs: authorizationPIDs, frontmostPID: frontmostApplication?.processIdentifier)
         }
     }
 
@@ -814,9 +1104,11 @@ final class FocusGuard: ObservableObject {
         guard permissionPollingTask == nil else { return }
         permissionPollingTask = Task { [weak self] in
             while !Task.isCancelled {
-                if Self.accessibilityPermission() {
-                    self?.inputPermissionRequired = false
-                    self?.lastBlockedApp = ""
+                self?.refreshAccessibilityPermission()
+                if self?.accessibilityGranted == true {
+                    if self?.lastBlockedApp == localized("请允许 PomoSentry 使用辅助功能后重新开始", "Allow PomoSentry in Accessibility, then start again") {
+                        self?.lastBlockedApp = ""
+                    }
                     self?.permissionPollingTask = nil
                     return
                 }
@@ -830,16 +1122,27 @@ final class FocusGuard: ObservableObject {
     }
 
     private func enforce(_ application: NSRunningApplication?) {
-        guard isMonitoring, let application, !application.isTerminated else { return }
+        guard isMonitoring, let configuration = activeConfiguration, let application, !application.isTerminated else { return }
         if application.processIdentifier == ProcessInfo.processInfo.processIdentifier {
             lastAllowedPID = application.processIdentifier
             activeBlockedPID = nil
             shieldController.dismiss()
             return
         }
-        let list = listPolicy == .allowlist ? allowedApps : blockedApps
-        let isListed = list.contains { ApplicationIdentity.matches(application, enrolled: $0) }
-        let shouldBlock = listPolicy.shouldBlock(isListed: isListed)
+        if SystemNavigationSurface.contains(bundleIdentifier: application.bundleIdentifier) {
+            activeBlockedPID = nil
+            shieldController.dismiss()
+            return
+        }
+        if administratorAuthorizationAllowed,
+           (SystemAuthorizationSurface.contains(bundleIdentifier: application.bundleIdentifier)
+            || activeAuthorizationPIDs.contains(application.processIdentifier)) {
+            activeBlockedPID = nil
+            shieldController.dismiss()
+            return
+        }
+        let isListed = activeListedPIDs.contains(application.processIdentifier)
+        let shouldBlock = configuration.policy.shouldBlock(isListed: isListed)
         guard shouldBlock else {
             lastAllowedPID = application.processIdentifier
             activeBlockedPID = nil
@@ -853,7 +1156,7 @@ final class FocusGuard: ObservableObject {
             blockedCount += 1
         }
         shieldController.show(applicationName: applicationName, processIdentifier: application.processIdentifier)
-        if blockingBehavior == .forceQuit {
+        if configuration.blockingBehavior == .forceQuit {
             _ = application.forceTerminate()
         } else {
             hideForFocus(application)
@@ -862,13 +1165,31 @@ final class FocusGuard: ObservableObject {
     }
 
     private func hideDisallowedApplications() {
-        guard blockingBehavior == .keepRunning else { return }
+        guard let configuration = activeConfiguration, configuration.blockingBehavior == .keepRunning else { return }
         for application in workspace.runningApplications where !application.isTerminated {
             guard application.processIdentifier != ProcessInfo.processInfo.processIdentifier else { continue }
-            let list = listPolicy == .allowlist ? allowedApps : blockedApps
-            let isListed = list.contains { ApplicationIdentity.matches(application, enrolled: $0) }
-            if listPolicy.shouldBlock(isListed: isListed) {
+            guard !SystemNavigationSurface.contains(bundleIdentifier: application.bundleIdentifier) else { continue }
+            guard !(administratorAuthorizationAllowed
+                     && (SystemAuthorizationSurface.contains(bundleIdentifier: application.bundleIdentifier)
+                         || activeAuthorizationPIDs.contains(application.processIdentifier))) else { continue }
+            let isListed = activeListedPIDs.contains(application.processIdentifier)
+            if configuration.policy.shouldBlock(isListed: isListed) {
                 hideForFocus(application)
+            }
+        }
+    }
+
+    private func terminateDisallowedApplications() {
+        guard let configuration = activeConfiguration, configuration.blockingBehavior == .forceQuit else { return }
+        for application in workspace.runningApplications where !application.isTerminated {
+            guard application.processIdentifier != ProcessInfo.processInfo.processIdentifier else { continue }
+            guard !SystemNavigationSurface.contains(bundleIdentifier: application.bundleIdentifier) else { continue }
+            guard !(administratorAuthorizationAllowed
+                     && (SystemAuthorizationSurface.contains(bundleIdentifier: application.bundleIdentifier)
+                         || activeAuthorizationPIDs.contains(application.processIdentifier))) else { continue }
+            let isListed = activeListedPIDs.contains(application.processIdentifier)
+            if configuration.policy.shouldBlock(isListed: isListed) {
+                _ = application.forceTerminate()
             }
         }
     }
@@ -878,6 +1199,13 @@ final class FocusGuard: ObservableObject {
         if application.hide(), !wasHidden {
             hiddenByGuardPIDs.insert(application.processIdentifier)
         }
+    }
+
+    private func isListed(_ application: NSRunningApplication, in applications: [AllowedApplication]) -> Bool {
+        if let cached = identityCache[application.processIdentifier] { return cached }
+        let result = applications.contains { ApplicationIdentity.matches(application, enrolled: $0) }
+        identityCache[application.processIdentifier] = result
+        return result
     }
 
     private func restoreApplicationsHiddenByGuard() {
@@ -900,6 +1228,7 @@ final class FocusGuard: ObservableObject {
     private func updateWebsiteRules(domains: [String], applying: Bool) async -> Bool {
         guard !websiteOperationInProgress else {
             websiteStatus = localized("已有网站规则操作正在进行", "A website-rule operation is already in progress")
+            lastProtectionError = websiteStatus
             return false
         }
         websiteOperationInProgress = true
@@ -916,7 +1245,9 @@ final class FocusGuard: ObservableObject {
             let result = await Task.detached(priority: .userInitiated) { Self.runAdministratorCommand(command) }.value
             let current = (try? String(contentsOfFile: "/etc/hosts", encoding: .utf8)) ?? ""
             websiteRulesActive = WebsiteRulesFile.hasValidRules(in: current)
-            let postconditionOK = domains.isEmpty ? !WebsiteRulesFile.containsAnyMarker(in: current) : websiteRulesActive
+            let postconditionOK = domains.isEmpty
+                ? !WebsiteRulesFile.containsAnyMarker(in: current)
+                : WebsiteRulesFile.hasExactRules(in: current, domains: domains)
             guard result.success else {
                 if applying && websiteRulesActive {
                     if let rollback = try? WebsiteRulesFile.replacement(existing: current, domains: []) {
@@ -928,16 +1259,19 @@ final class FocusGuard: ObservableObject {
                 websiteStatus = result.exitCode == 74
                     ? WebsiteRulesError.changedConcurrently.localizedDescription
                     : WebsiteRulesError.authorization(result.message).localizedDescription
+                lastProtectionError = websiteStatus
                 return false
             }
             guard postconditionOK else { throw WebsiteRulesError.postcondition }
             websiteStatus = applying
                 ? localized("网站域名拦截已生效", "Website-domain blocking is active")
                 : localized("网站规则已安全清除", "Website rules were removed safely")
+            lastProtectionError = ""
             return true
         } catch {
             reconcileWebsiteState()
             websiteStatus = error.localizedDescription
+            lastProtectionError = websiteStatus
             return false
         }
     }
@@ -980,7 +1314,14 @@ enum SessionPhase: String, Codable, Sendable {
     case idle
     case preparing
     case running
+    case paused
     case cleaning
+}
+
+private enum CleanupRecovery {
+    case failedStart
+    case completedRound
+    case reset
 }
 
 struct SessionJournal: Codable, Sendable {
@@ -991,6 +1332,33 @@ struct SessionJournal: Codable, Sendable {
     let selectedTaskID: UUID?
     let strictApps: Bool
     let strictWebsites: Bool
+    let remainingSeconds: Int?
+    let strictAppConfiguration: StrictAppConfiguration?
+    let websiteDomains: [String]?
+
+    init(
+        id: UUID,
+        mode: TimerMode,
+        plannedSeconds: Int,
+        deadline: Date?,
+        selectedTaskID: UUID?,
+        strictApps: Bool,
+        strictWebsites: Bool,
+        remainingSeconds: Int? = nil,
+        strictAppConfiguration: StrictAppConfiguration? = nil,
+        websiteDomains: [String]? = nil
+    ) {
+        self.id = id
+        self.mode = mode
+        self.plannedSeconds = plannedSeconds
+        self.deadline = deadline
+        self.selectedTaskID = selectedTaskID
+        self.strictApps = strictApps
+        self.strictWebsites = strictWebsites
+        self.remainingSeconds = remainingSeconds
+        self.strictAppConfiguration = strictAppConfiguration
+        self.websiteDomains = websiteDomains
+    }
 }
 
 enum Countdown {
@@ -999,16 +1367,27 @@ enum Countdown {
     }
 }
 
+enum CalendarDayStamp {
+    static func value(for date: Date = Date(), calendar: Calendar = .current) -> String {
+        let components = calendar.dateComponents([.era, .year, .month, .day], from: date)
+        return "\(components.era ?? 0)-\(components.year ?? 0)-\(components.month ?? 0)-\(components.day ?? 0)"
+    }
+}
+
 @MainActor
 final class TimerStore: ObservableObject {
     @Published var mode: TimerMode = .focus
     @Published private(set) var secondsRemaining = TimerMode.focus.duration
     @Published var focusMinutes = 25
+    @Published var shortBreakMinutes = 5
+    @Published var longBreakMinutes = 15
     @Published private(set) var phase: SessionPhase = .idle
     @Published var completedPomodoros = 0
+    @Published var dailyGoal = 8
     @Published var tasks: [PomodoroTask] = []
     @Published var selectedTaskID: UUID?
     @Published var newTaskTitle = ""
+    @Published var newTaskDueChoice: TaskDueChoice = .today
     @Published var soundEnabled = true
     let focusGuard = FocusGuard()
 
@@ -1017,24 +1396,57 @@ final class TimerStore: ObservableObject {
     private var lifecycleTask: Task<Void, Never>?
     private var lifecycleGeneration = UUID()
     private var completionInProgress = false
+    private var cleanupRecovery: CleanupRecovery?
 
     init() {
         load()
+        if let savedSession = session {
+            phase = .preparing
+            focusGuard.setConfigurationLocked(savedSession.strictApps || savedSession.strictWebsites)
+        }
         Task { await restoreSessionIfNeeded() }
     }
 
     var isRunning: Bool { phase == .running }
+    var isPaused: Bool { phase == .paused }
     var isPreparing: Bool { phase == .preparing || phase == .cleaning }
     var isBusyOrLocked: Bool { isPreparing || isStrictlyLocked }
+    var canRetryProtection: Bool {
+        if phase == .cleaning {
+            return cleanupRecovery != nil && !focusGuard.isWebsiteOperationInProgress
+        }
+        return phase == .preparing
+            && (session?.deadline != nil || session?.strictWebsites == true)
+            && !focusGuard.isWebsiteOperationInProgress
+            && !(session?.strictApps == true && !focusGuard.accessibilityGranted)
+    }
     var totalSeconds: Int { session?.plannedSeconds ?? duration(for: mode) }
     var progress: Double { totalSeconds > 0 ? min(max(1 - Double(secondsRemaining) / Double(totalSeconds), 0), 1) : 0 }
     var timeString: String { String(format: "%02d:%02d", secondsRemaining / 60, secondsRemaining % 60) }
-    var menuBarTitle: String { isRunning ? timeString : "PomoSentry" }
+    var menuBarTitle: String { isRunning || isPaused ? timeString : "PomoSentry" }
+    func primaryActionTitle(language: String? = nil) -> String {
+        if isPreparing { return localized("正在准备", "Preparing", language: language) }
+        if isStrictlyLocked { return localized("严格专注中", "Focus Locked", language: language) }
+        if isRunning { return localized("暂停", "Pause", language: language) }
+        if isPaused { return localized("继续", "Resume", language: language) }
+        return localized("开始", "Start", language: language)
+    }
+
+    func timerStateTitle(language: String? = nil) -> String {
+        if isRunning { return localized("进行中", "In Progress", language: language) }
+        if isPaused { return localized("已暂停", "Paused", language: language) }
+        return localized("准备开始", "Ready", language: language)
+    }
     var isStrictlyLocked: Bool {
         guard mode == .focus, session?.strictApps == true || session?.strictWebsites == true else { return false }
         return phase != .idle
     }
-    var requiresTerminationCleanup: Bool { isPreparing || session != nil || focusGuard.requiresWebsiteCleanup }
+    var requiresTerminationCleanup: Bool {
+        isPreparing || session?.strictWebsites == true || focusGuard.requiresWebsiteCleanup
+    }
+    func isTaskLockedToCurrentSession(_ id: UUID) -> Bool {
+        phase != .idle && session?.selectedTaskID == id
+    }
 
     var statusText: String {
         let english = (defaults.string(forKey: "appLanguage") ?? "zh-Hans").hasPrefix("en")
@@ -1046,17 +1458,16 @@ final class TimerStore: ObservableObject {
         }
         if phase == .preparing { return english ? "Preparing protections…" : "正在准备保护规则…" }
         if phase == .cleaning { return english ? "Cleaning protections…" : "正在清理保护规则…" }
+        if phase == .paused { return english ? "Paused · \(name) · \(timeString)" : "已暂停 · \(name) · \(timeString)" }
         return isRunning ? (english ? "\(name) · \(timeString)" : "正在\(name) · \(timeString)") : (english ? "Ready for \(name) · \(timeString)" : "准备\(name) · \(timeString)")
     }
 
     var todayTasks: [PomodoroTask] {
-        tasks.filter { task in
-            guard let date = task.dueDate else { return true }
-            return Calendar.current.isDateInToday(date)
-        }
+        tasks.filter { TaskVisibility.belongsInToday($0) }
     }
 
     func tick(now: Date = Date()) {
+        rolloverDailyProgressIfNeeded(now: now)
         guard phase == .running, let deadline = session?.deadline else { return }
         let remaining = Countdown.remaining(deadline: deadline, now: now)
         secondsRemaining = remaining
@@ -1069,7 +1480,9 @@ final class TimerStore: ObservableObject {
     func toggleTimer() {
         guard !isBusyOrLocked else { return }
         if isRunning {
-            lifecycleTask = Task { await transitionToIdle(resetClock: false) }
+            pauseCurrentRound()
+        } else if isPaused {
+            resumePausedRound()
         } else {
             lifecycleTask = Task { await startCurrentRound() }
         }
@@ -1080,6 +1493,15 @@ final class TimerStore: ObservableObject {
         lifecycleTask = Task { await transitionToIdle(resetClock: true) }
     }
 
+    func retryProtectionSetup() {
+        guard canRetryProtection else { return }
+        if phase == .cleaning {
+            lifecycleTask = Task { await retryCleanup() }
+        } else {
+            lifecycleTask = Task { await restoreSessionIfNeeded() }
+        }
+    }
+
     func selectMode(_ newMode: TimerMode) {
         guard phase == .idle else { return }
         mode = newMode
@@ -1088,16 +1510,40 @@ final class TimerStore: ObservableObject {
     }
 
     func setFocusMinutes(_ minutes: Int) {
+        setMinutes(minutes, for: .focus)
+    }
+
+    func setMinutes(_ minutes: Int, for timerMode: TimerMode) {
         guard phase == .idle else { return }
-        focusMinutes = min(max(minutes, 1), 240)
-        defaults.set(focusMinutes, forKey: "focusMinutes")
-        if mode == .focus { secondsRemaining = focusMinutes * 60 }
+        switch timerMode {
+        case .focus:
+            focusMinutes = min(max(minutes, 1), 240)
+            defaults.set(focusMinutes, forKey: "focusMinutes")
+        case .shortBreak:
+            shortBreakMinutes = min(max(minutes, 1), 60)
+            defaults.set(shortBreakMinutes, forKey: "shortBreakMinutes")
+        case .longBreak:
+            longBreakMinutes = min(max(minutes, 1), 120)
+            defaults.set(longBreakMinutes, forKey: "longBreakMinutes")
+        }
+        if mode == timerMode { secondsRemaining = duration(for: timerMode) }
+    }
+
+    func setDailyGoal(_ goal: Int) {
+        dailyGoal = min(max(goal, 1), 24)
+        defaults.set(dailyGoal, forKey: "dailyGoal")
+    }
+
+    func setSoundEnabled(_ enabled: Bool) {
+        soundEnabled = enabled
+        defaults.set(enabled, forKey: "soundEnabled")
     }
 
     func addTask() {
+        guard phase == .idle else { return }
         let title = newTaskTitle.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !title.isEmpty else { return }
-        let task = PomodoroTask(title: title)
+        let task = PomodoroTask(title: title, dueDate: dueDate(for: newTaskDueChoice))
         tasks.append(task)
         selectedTaskID = task.id
         newTaskTitle = ""
@@ -1105,17 +1551,35 @@ final class TimerStore: ObservableObject {
     }
 
     func selectTask(_ id: UUID?) {
+        guard phase == .idle else { return }
         selectedTaskID = id
         saveGeneralState()
     }
 
+    func setTaskDueChoice(_ choice: TaskDueChoice, for task: PomodoroTask) {
+        guard !isTaskLockedToCurrentSession(task.id),
+              let index = tasks.firstIndex(where: { $0.id == task.id }) else { return }
+        tasks[index].dueDate = dueDate(for: choice)
+        saveGeneralState()
+    }
+
+    func taskDueChoice(for task: PomodoroTask) -> TaskDueChoice {
+        guard let date = task.dueDate else { return .unscheduled }
+        let calendar = Calendar.current
+        if calendar.isDateInToday(date) { return .today }
+        if calendar.isDateInTomorrow(date) { return .tomorrow }
+        return .unscheduled
+    }
+
     func toggleTask(_ task: PomodoroTask) {
+        guard phase == .idle else { return }
         guard let index = tasks.firstIndex(where: { $0.id == task.id }) else { return }
         tasks[index].isDone.toggle()
         saveGeneralState()
     }
 
     func deleteTask(_ task: PomodoroTask) {
+        guard !isTaskLockedToCurrentSession(task.id) else { return }
         tasks.removeAll { $0.id == task.id }
         if selectedTaskID == task.id { selectedTaskID = nil }
         saveGeneralState()
@@ -1127,6 +1591,7 @@ final class TimerStore: ObservableObject {
         pending?.cancel()
         await pending?.value
         phase = .cleaning
+        cleanupRecovery = .reset
         focusGuard.stopMonitoring()
         let cleaned = await focusGuard.clearWebsiteRules()
         if cleaned {
@@ -1143,32 +1608,112 @@ final class TimerStore: ObservableObject {
         let planned = duration(for: mode)
         let strictApps = mode == .focus && focusGuard.isEnabled
         let strictWebsites = mode == .focus && focusGuard.websiteBlockingEnabled && !focusGuard.blockedWebsites.isEmpty
+        let strictAppConfiguration = strictApps ? focusGuard.currentConfiguration : nil
+        let websiteDomains = strictWebsites ? focusGuard.blockedWebsites : nil
+        focusGuard.setConfigurationLocked(strictApps || strictWebsites)
         phase = .preparing
-        session = SessionJournal(id: generation, mode: mode, plannedSeconds: planned, deadline: nil, selectedTaskID: selectedTaskID, strictApps: strictApps, strictWebsites: strictWebsites)
+        session = SessionJournal(
+            id: generation,
+            mode: mode,
+            plannedSeconds: planned,
+            deadline: nil,
+            selectedTaskID: selectedTaskID,
+            strictApps: strictApps,
+            strictWebsites: strictWebsites,
+            strictAppConfiguration: strictAppConfiguration,
+            websiteDomains: websiteDomains
+        )
         saveSession()
 
-        if strictApps, !focusGuard.startMonitoring() {
+        if strictApps, !focusGuard.validateAccessibilityPermission() {
+            clearSession()
+            phase = .idle
+            return
+        }
+        if strictApps, !focusGuard.startMonitoring(
+            configuration: strictAppConfiguration,
+            allowAdministratorAuthorization: strictWebsites
+        ) {
             clearSession()
             phase = .idle
             return
         }
         if strictWebsites {
-            let success = await focusGuard.applyWebsiteRules()
+            let success = await focusGuard.applyWebsiteRules(domains: websiteDomains)
             guard lifecycleGeneration == generation, !Task.isCancelled else {
+                focusGuard.stopMonitoring()
                 _ = await focusGuard.clearWebsiteRules()
                 return
             }
             guard success else {
                 focusGuard.stopMonitoring()
-                clearSession()
-                phase = .idle
+                let cleaned = await focusGuard.clearWebsiteRules()
+                if cleaned {
+                    clearSession()
+                    phase = .idle
+                } else {
+                    cleanupRecovery = .failedStart
+                    phase = .cleaning
+                }
                 return
+            }
+            if strictApps {
+                focusGuard.setAdministratorAuthorizationAllowed(false)
             }
         }
 
         let deadline = Date().addingTimeInterval(TimeInterval(planned))
-        session = SessionJournal(id: generation, mode: mode, plannedSeconds: planned, deadline: deadline, selectedTaskID: selectedTaskID, strictApps: strictApps, strictWebsites: strictWebsites)
+        session = SessionJournal(
+            id: generation,
+            mode: mode,
+            plannedSeconds: planned,
+            deadline: deadline,
+            selectedTaskID: selectedTaskID,
+            strictApps: strictApps,
+            strictWebsites: strictWebsites,
+            strictAppConfiguration: strictAppConfiguration,
+            websiteDomains: websiteDomains
+        )
         secondsRemaining = planned
+        phase = .running
+        saveSession()
+    }
+
+    private func pauseCurrentRound(now: Date = Date()) {
+        guard phase == .running, !isStrictlyLocked, let current = session, let deadline = current.deadline else { return }
+        let remaining = Countdown.remaining(deadline: deadline, now: now)
+        guard remaining > 0 else {
+            tick(now: now)
+            return
+        }
+        secondsRemaining = remaining
+        session = SessionJournal(
+            id: current.id,
+            mode: current.mode,
+            plannedSeconds: current.plannedSeconds,
+            deadline: nil,
+            selectedTaskID: current.selectedTaskID,
+            strictApps: false,
+            strictWebsites: false,
+            remainingSeconds: remaining
+        )
+        phase = .paused
+        saveSession()
+    }
+
+    private func resumePausedRound() {
+        guard phase == .paused, let current = session, let remaining = current.remainingSeconds, remaining > 0 else { return }
+        let deadline = Date().addingTimeInterval(TimeInterval(remaining))
+        session = SessionJournal(
+            id: current.id,
+            mode: current.mode,
+            plannedSeconds: current.plannedSeconds,
+            deadline: deadline,
+            selectedTaskID: current.selectedTaskID,
+            strictApps: false,
+            strictWebsites: false
+        )
+        secondsRemaining = remaining
         phase = .running
         saveSession()
     }
@@ -1177,6 +1722,7 @@ final class TimerStore: ObservableObject {
         guard !isStrictlyLocked else { return }
         lifecycleGeneration = UUID()
         phase = .cleaning
+        cleanupRecovery = .reset
         focusGuard.stopMonitoring()
         let cleaned = await focusGuard.clearWebsiteRules()
         guard cleaned else {
@@ -1190,22 +1736,24 @@ final class TimerStore: ObservableObject {
     }
 
     private func completeCurrentRound() async {
-        guard let completedMode = session?.mode ?? (phase == .running ? mode : nil) else {
+        guard let completedSession = session else {
             completionInProgress = false
             return
         }
+        let completedMode = completedSession.mode
+        let completedTaskID = completedSession.selectedTaskID
         phase = .cleaning
-        focusGuard.stopMonitoring()
+        cleanupRecovery = .completedRound
         let cleaned = await focusGuard.clearWebsiteRules()
         guard cleaned else {
-            completionInProgress = false
             phase = .cleaning
             return
         }
+        focusGuard.stopMonitoring()
         clearSession()
         if completedMode == .focus {
             completedPomodoros += 1
-            if let id = selectedTaskID, let index = tasks.firstIndex(where: { $0.id == id }) { tasks[index].pomodoros += 1 }
+            if let id = completedTaskID, let index = tasks.firstIndex(where: { $0.id == id }) { tasks[index].pomodoros += 1 }
             mode = completedPomodoros.isMultiple(of: 4) ? .longBreak : .shortBreak
         } else {
             mode = .focus
@@ -1217,11 +1765,36 @@ final class TimerStore: ObservableObject {
         saveGeneralState()
     }
 
+    private func retryCleanup() async {
+        guard phase == .cleaning, let recovery = cleanupRecovery else { return }
+        let cleaned = await focusGuard.clearWebsiteRules()
+        guard cleaned else { return }
+        switch recovery {
+        case .completedRound:
+            await completeCurrentRound()
+        case .failedStart, .reset:
+            focusGuard.stopMonitoring()
+            clearSession()
+            phase = .idle
+            secondsRemaining = duration(for: mode)
+            saveGeneralState()
+        }
+    }
+
     private func restoreSessionIfNeeded() async {
         guard let saved = session else { return }
         mode = saved.mode
+        focusGuard.setConfigurationLocked(saved.strictApps || saved.strictWebsites)
         selectedTaskID = saved.selectedTaskID.flatMap { id in tasks.contains(where: { $0.id == id }) ? id : nil }
         guard let deadline = saved.deadline else {
+            if let remaining = saved.remainingSeconds,
+               remaining > 0,
+               !saved.strictApps,
+               !saved.strictWebsites {
+                secondsRemaining = min(remaining, saved.plannedSeconds)
+                phase = .paused
+                return
+            }
             _ = await focusGuard.clearWebsiteRules()
             clearSession()
             phase = .idle
@@ -1235,17 +1808,57 @@ final class TimerStore: ObservableObject {
             await completeCurrentRound()
             return
         }
-        if saved.strictApps { _ = focusGuard.startMonitoring() }
-        if saved.strictWebsites {
-            focusGuard.reconcileWebsiteState()
-            if !focusGuard.websiteRulesActive {
+        if saved.strictApps {
+            while !focusGuard.validateAccessibilityPermission() {
                 phase = .preparing
-                guard await focusGuard.applyWebsiteRules() else {
-                    focusGuard.stopMonitoring()
-                    clearSession()
-                    phase = .idle
+                secondsRemaining = Countdown.remaining(deadline: deadline)
+                if secondsRemaining == 0 {
+                    phase = .running
+                    completionInProgress = true
+                    await completeCurrentRound()
                     return
                 }
+                try? await Task.sleep(for: .milliseconds(500))
+            }
+        }
+        let restoredWebsiteDomains = saved.websiteDomains ?? focusGuard.blockedWebsites
+        if saved.strictWebsites {
+            guard !restoredWebsiteDomains.isEmpty else {
+                focusGuard.stopMonitoring()
+                _ = await focusGuard.clearWebsiteRules()
+                clearSession()
+                phase = .idle
+                secondsRemaining = duration(for: mode)
+                return
+            }
+            focusGuard.reconcileWebsiteState()
+        }
+        let websiteNeedsApply = saved.strictWebsites && !focusGuard.websiteRulesMatch(domains: restoredWebsiteDomains)
+        if saved.strictApps {
+            while !focusGuard.startMonitoring(
+                configuration: saved.strictAppConfiguration,
+                allowAdministratorAuthorization: websiteNeedsApply
+            ) {
+                phase = .preparing
+                secondsRemaining = Countdown.remaining(deadline: deadline)
+                if secondsRemaining == 0 {
+                    phase = .running
+                    completionInProgress = true
+                    await completeCurrentRound()
+                    return
+                }
+                try? await Task.sleep(for: .milliseconds(500))
+            }
+        }
+        if saved.strictWebsites, websiteNeedsApply {
+            phase = .preparing
+            guard await focusGuard.applyWebsiteRules(domains: restoredWebsiteDomains) else {
+                phase = .preparing
+                secondsRemaining = Countdown.remaining(deadline: deadline)
+                return
+            }
+            if saved.strictApps {
+                focusGuard.setAdministratorAuthorizationAllowed(false)
             }
         }
         phase = .running
@@ -1255,6 +1868,8 @@ final class TimerStore: ObservableObject {
     private func saveGeneralState() {
         defaults.set(try? JSONEncoder().encode(tasks), forKey: "tasks")
         defaults.set(completedPomodoros, forKey: "completedPomodoros")
+        defaults.set(CalendarDayStamp.value(), forKey: "completedPomodorosDay")
+        defaults.set(soundEnabled, forKey: "soundEnabled")
         defaults.set(selectedTaskID?.uuidString, forKey: "selectedTaskID")
         defaults.set(mode.rawValue, forKey: "timerMode")
     }
@@ -1266,19 +1881,58 @@ final class TimerStore: ObservableObject {
 
     private func clearSession() {
         session = nil
+        cleanupRecovery = nil
         defaults.removeObject(forKey: "activeSession")
+        focusGuard.setConfigurationLocked(false)
     }
 
     private func load() {
         let savedMinutes = defaults.integer(forKey: "focusMinutes")
         focusMinutes = savedMinutes > 0 ? min(max(savedMinutes, 1), 240) : 25
+        let savedShortBreak = defaults.integer(forKey: "shortBreakMinutes")
+        shortBreakMinutes = savedShortBreak > 0 ? min(max(savedShortBreak, 1), 60) : 5
+        let savedLongBreak = defaults.integer(forKey: "longBreakMinutes")
+        longBreakMinutes = savedLongBreak > 0 ? min(max(savedLongBreak, 1), 120) : 15
+        let savedGoal = defaults.integer(forKey: "dailyGoal")
+        dailyGoal = savedGoal > 0 ? min(max(savedGoal, 1), 24) : 8
         if let raw = defaults.string(forKey: "timerMode"), let savedMode = TimerMode(rawValue: raw) { mode = savedMode }
         if let data = defaults.data(forKey: "tasks"), let decoded = try? JSONDecoder().decode([PomodoroTask].self, from: data) { tasks = decoded }
         completedPomodoros = defaults.integer(forKey: "completedPomodoros")
+        soundEnabled = defaults.object(forKey: "soundEnabled") as? Bool ?? true
+        rolloverDailyProgressIfNeeded()
         if let value = defaults.string(forKey: "selectedTaskID"), let id = UUID(uuidString: value), tasks.contains(where: { $0.id == id }) { selectedTaskID = id }
         if let data = defaults.data(forKey: "activeSession"), let decoded = try? JSONDecoder().decode(SessionJournal.self, from: data) { session = decoded }
         secondsRemaining = duration(for: mode)
     }
 
-    private func duration(for mode: TimerMode) -> Int { mode == .focus ? focusMinutes * 60 : mode.duration }
+    private func rolloverDailyProgressIfNeeded(now: Date = Date()) {
+        let today = CalendarDayStamp.value(for: now)
+        guard let recordedDay = defaults.string(forKey: "completedPomodorosDay") else {
+            defaults.set(today, forKey: "completedPomodorosDay")
+            return
+        }
+        guard recordedDay != today else { return }
+        completedPomodoros = 0
+        defaults.set(0, forKey: "completedPomodoros")
+        defaults.set(today, forKey: "completedPomodorosDay")
+    }
+
+    private func duration(for mode: TimerMode) -> Int {
+        switch mode {
+        case .focus: focusMinutes * 60
+        case .shortBreak: shortBreakMinutes * 60
+        case .longBreak: longBreakMinutes * 60
+        }
+    }
+
+    private func dueDate(for choice: TaskDueChoice) -> Date? {
+        switch choice {
+        case .today:
+            Date()
+        case .tomorrow:
+            Calendar.current.date(byAdding: .day, value: 1, to: Date())
+        case .unscheduled:
+            nil
+        }
+    }
 }

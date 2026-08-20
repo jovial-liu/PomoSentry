@@ -6,6 +6,7 @@
 "选择当前任务，记录每个任务投入的番茄数。" = "Choose a current task and track completed sessions.";
 "严格白名单" = "Strict allowlist";
 "非白名单 App 无法切到前台，但可以继续在后台运行。" = "Apps outside the allowlist cannot come to the foreground, but may keep running in the background.";
+"非白名单窗口会隐藏并显示黑色拦截页，但 App 继续在后台运行。" = "Apps outside the allowlist are hidden behind a black blocking screen while they keep running in the background.";
 "开始使用" = "Get Started";
 "语言" = "Language";
 "学霸番茄 · 专注守卫" = "Focus timer · Distraction guard";
@@ -31,6 +32,8 @@
 "从下方选择一个任务开始" = "Choose a task below to begin";
 "开始" = "Start";
 "暂停" = "Pause";
+"继续" = "Resume";
+"已暂停" = "Paused";
 "严格专注中" = "Focus Locked";
 "重置本轮" = "Reset Round";
 "今天的任务" = "Today's Tasks";
@@ -68,6 +71,10 @@
 "专注时这些 App 无法切到前台，但仍可在后台运行" = "These apps cannot come to the foreground, but keep running in the background.";
 "名单为空，点击右上角添加 App" = "This list is empty. Add an app using the button above.";
 "专注时长" = "Focus Duration";
+"短休息时长" = "Short Break Duration";
+"长休息时长" = "Long Break Duration";
+"自由调节计时时长" = "Adjust timer duration";
+"设置每日番茄目标" = "Set daily session goal";
 "自由调节 1–240 分钟" = "Adjust freely from 1–240 minutes";
 "正在准备" = "Preparing";
 "正式版网络过滤" = "Production Network Filtering";
@@ -85,3 +92,15 @@
 "当前版本按精确域名拦截，并在启用和清除时分别请求管理员确认。子域名需要单独添加；正式的全域名后缀过滤需要 Apple Network Extension 授权。" = "This version blocks exact hostnames and requests administrator approval when applying and removing rules. Add subdomains separately; suffix-wide filtering requires Apple Network Extension approval.";
 "强制退出可能导致其他 App 中未保存的内容丢失，请在开始专注前保存工作。" = "Force Quit may discard unsaved work in other apps. Save your work before focusing.";
 "会话会在重新打开后恢复；但电脑所有者始终可以强制结束普通用户 App。" = "Sessions resume after relaunch, but the computer owner can always force-terminate an ordinary user app.";
+"严格专注已锁定，将在倒计时结束后自动解除。" = "Strict focus is locked and will end automatically when the countdown finishes.";
+"严格拦截需要辅助功能权限；未授权时不会开始计时。" = "Strict blocking requires Accessibility permission; the timer will not start without it.";
+"如果同名 PomoSentry 已开启但仍显示未授权，请删除旧条目，再用“+”添加当前版本。" = "If an enabled PomoSentry entry still appears unauthorized, remove the old entry and add this copy with the + button.";
+"打开系统设置" = "Open System Settings";
+"显示当前 App" = "Show Current App";
+"明天" = "Tomorrow";
+"未安排" = "Unscheduled";
+"完成提示音" = "Completion sound";
+"还没有任务" = "No tasks yet";
+"今天没有待办任务" = "No tasks due today";
+"从上面的输入框添加第一个任务。" = "Add your first task using the field above.";
+"添加任务，或把任务安排到今天。" = "Add a task, or schedule one for today.";
