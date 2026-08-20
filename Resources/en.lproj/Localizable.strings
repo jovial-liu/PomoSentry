@@ -48,15 +48,12 @@
 "仅在计时器运行期间生效" = "Active only while the timer runs";
 "强制关闭被拦截的 App" = "Force quit blocked apps";
 "强制关闭可能导致其他 App 中未保存的内容丢失，请在开始专注前保存工作。" = "Force quit may discard unsaved work in other apps. Save before starting.";
-"紧急结束严格专注" = "Emergency End Strict Focus";
 "允许使用的 App" = "Allowed Apps";
 "专注时只有这些 App 可以切到前台" = "Only these apps can come to the foreground during focus.";
 "添加 App" = "Add App";
 "必需" = "Required";
 "确定结束严格专注？" = "End strict focus?";
 "为了避免冲动退出，请输入下面的确认文字。" = "To prevent an impulsive exit, type the confirmation text below.";
-"继续专注" = "Keep Focusing";
-"确认结束" = "Confirm End";
 "应用与网站" = "Apps & Websites";
 "浏览器也按 App 管理；你可以只允许名单内应用，或只拦截名单内应用。" = "Browsers are managed as apps. Allow only listed apps, or block only listed apps.";
 "名单策略" = "List Policy";

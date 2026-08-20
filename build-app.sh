@@ -5,11 +5,12 @@ project_dir="$(cd "$(dirname "$0")" && pwd)"
 cd "$project_dir"
 
 version="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$project_dir/Info.plist")"
+build_number="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$project_dir/Info.plist")"
 release_mode="${POMOSENTRY_RELEASE_MODE:-development}"
 signing_identity="${POMOSENTRY_SIGN_IDENTITY:-}"
 entitlements="$project_dir/PomoSentry.entitlements"
 app_dir="$project_dir/PomoSentry.app"
-artifact_suffix="$version-universal"
+artifact_suffix="$version-build$build_number-universal"
 
 if [[ "$release_mode" != "development" && "$release_mode" != "public" ]]; then
     echo "POMOSENTRY_RELEASE_MODE must be development or public" >&2
@@ -44,6 +45,11 @@ x64_bin_dir="$(swift build -c release --arch x86_64 --show-bin-path)"
 
 if [[ "$release_mode" == "public" ]]; then
     /usr/bin/codesign --force --options runtime --timestamp --entitlements "$entitlements" --sign "$signing_identity" "$app_dir"
+    signing_details="$(/usr/bin/codesign --display --verbose=4 "$app_dir" 2>&1)"
+    if [[ "$signing_details" != *"Authority=Developer ID Application:"* || "$signing_details" != *"TeamIdentifier="* || "$signing_details" == *"TeamIdentifier=not set"* ]]; then
+        echo "Public release refused: the app is not signed with a Developer ID Application identity." >&2
+        exit 66
+    fi
 else
     /usr/bin/codesign --force --sign - "$app_dir"
 fi
@@ -91,7 +97,10 @@ if [[ "$release_mode" == "public" ]]; then
     /usr/sbin/spctl --assess --type open --context context:primary-signature --verbose=4 "$dmg_path"
 fi
 
-/usr/bin/shasum -a 256 "$dmg_path" "$zip_path" > "$project_dir/PomoSentry-$artifact_suffix-SHA256.txt"
+(
+    cd "$project_dir"
+    /usr/bin/shasum -a 256 "$(/usr/bin/basename "$dmg_path")" "$(/usr/bin/basename "$zip_path")"
+) > "$project_dir/PomoSentry-$artifact_suffix-SHA256.txt"
 echo "Built mode: $release_mode"
 echo "Built $app_dir"
 echo "Built $dmg_path"

@@ -18,6 +18,7 @@ PomoSentry 是独立的双语 macOS 专注应用，不依赖番茄 ToDo。macOS 
 - Dock、菜单栏和窗口切换器仅作为系统导航通道放行；切换后的目标 App 仍按白名单身份严格判定
 - 精确网站域名黑名单；浏览器继续运行，只拦截已添加的主机名
 - 中英文界面、菜单栏倒计时、本地任务和番茄统计
+- 每日进度与四轮休息序列独立保存；完成记录可在异常退出后幂等恢复，不会重复计数
 - 紧凑窗口自动切换布局，支持减少动态效果、键盘快捷键和更完整的 VoiceOver 标签
 - `⌘P` 开始/暂停、`⌘R` 重置、`⌘N` 添加任务；保护规则清理失败时保持锁定并提供重试
 
@@ -36,6 +37,7 @@ PomoSentry 是独立的双语 macOS 专注应用，不依赖番茄 ToDo。macOS 
 ```
 
 默认生成带 `-development` 后缀的临时签名测试包。它不能作为公开发行包，也不应指导用户绕过 Gatekeeper。
+文件名包含版本和 build 号，例如 `PomoSentry-1.4.0-build8-universal-development.dmg`；同目录会生成只包含文件名的 `SHA256.txt` 校验文件。
 
 ## 正式发行
 
@@ -49,6 +51,14 @@ export POMOSENTRY_NOTARY_PROFILE="pomosentry-notary"
 ```
 
 也可以提供 `POMOSENTRY_APPLE_ID`、`POMOSENTRY_TEAM_ID` 和 `POMOSENTRY_APP_PASSWORD`。脚本会执行测试、通用架构校验、Hardened Runtime 签名、公证、staple、Gatekeeper 检查和 SHA-256 摘要生成。
+
+## 安装与升级
+
+- DMG：打开镜像，将 `PomoSentry.app` 拖入“应用程序”，然后首次打开并按提示授权辅助功能。
+- ZIP：解压后将 App 移入“应用程序”；不要直接从下载目录长期运行。
+- 覆盖安装会保留任务、时长、名单和会话记录；如果 macOS 重新要求辅助功能授权，请在系统设置中删除旧条目，再添加当前 App。
+- 校验下载包：在校验文件所在目录执行 `shasum -a 256 -c PomoSentry-1.4.0-build8-universal-SHA256.txt`。
+- 当前没有自动更新器；新版本需要手动下载并覆盖安装。正式包必须使用 Developer ID 签名并完成公证，开发包只用于本机测试。
 
 ---
 

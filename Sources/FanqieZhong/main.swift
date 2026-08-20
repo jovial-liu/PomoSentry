@@ -262,6 +262,14 @@ struct GuardPanel: View {
                             .fixedSize(horizontal: false, vertical: true)
                     }
 
+                    if focusGuard.isMonitoring && !focusGuard.inputProtectionHealthy {
+                        Label(localized("输入保护尚未恢复，严格模式会保持锁定。", "Input protection has not recovered; strict mode remains locked.", language: appLanguage),
+                              systemImage: "lock.trianglebadge.exclamationmark.fill")
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundStyle(Color.orange)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+
                     if focusGuard.isEnabled && (!focusGuard.accessibilityGranted || focusGuard.inputPermissionRequired) {
                         VStack(alignment: .leading, spacing: 9) {
                             Label("严格拦截需要辅助功能权限；未授权时不会开始计时。", systemImage: "exclamationmark.shield.fill")
@@ -547,7 +555,9 @@ struct WebsiteRulesCard: View {
 
     private var websiteStatusContent: some View {
         HStack(spacing: 8) {
-            Image(systemName: focusGuard.websiteRulesActive ? "checkmark.shield.fill" : "info.circle.fill")
+            Image(systemName: focusGuard.websiteRulesActive
+                  ? "checkmark.shield.fill"
+                  : (focusGuard.requiresWebsiteCleanup ? "exclamationmark.shield.fill" : "info.circle.fill"))
                 .foregroundStyle(focusGuard.websiteRulesActive ? Color.green : Color.orange)
             Text(focusGuard.websiteStatus.isEmpty
                  ? localized("开始和结束时 macOS 会分别请求管理员确认；每次操作后都会验证真实系统状态。",
@@ -562,7 +572,7 @@ struct WebsiteRulesCard: View {
 
     @ViewBuilder
     private var clearWebsiteButton: some View {
-        if focusGuard.websiteRulesActive {
+        if focusGuard.requiresWebsiteCleanup {
             Button("立即清除") { Task { await focusGuard.clearWebsiteRules() } }
                 .buttonStyle(.plain)
                 .font(.system(size: 10, weight: .semibold))

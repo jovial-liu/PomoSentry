@@ -55,6 +55,13 @@ final class PomoSentryCoreTests: XCTestCase {
         XCTAssertFalse(AppListPolicy.blocklist.shouldBlock(isListed: false))
     }
 
+    func testPomodoroSequenceUsesIndependentCycleCount() {
+        XCTAssertEqual(PomodoroSequence.nextMode(after: 3), .shortBreak)
+        XCTAssertEqual(PomodoroSequence.nextMode(after: 4), .longBreak)
+        XCTAssertEqual(PomodoroSequence.nextMode(after: 7), .shortBreak)
+        XCTAssertEqual(PomodoroSequence.nextMode(after: 8), .longBreak)
+    }
+
     func testStrictInputDecisionAllowsOnlySelfListedAndNavigationTargets() {
         let listed: Set<pid_t> = [20]
         let navigation: Set<pid_t> = [30]
